@@ -14,13 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.softaffinity
-
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.locks.ReentrantReadWriteLock
-
-import scala.collection.mutable
 
 import io.glutenproject.GlutenConfig
 import io.glutenproject.softaffinity.strategy.SoftAffinityStrategy
@@ -29,16 +23,18 @@ import io.glutenproject.utils.LogLevelUtil
 import org.apache.spark.SparkEnv
 import org.apache.spark.internal.Logging
 
-object SoftAffinityManager extends LogLevelUtil with Logging {
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.ReentrantReadWriteLock
 
-  val resourceRWLock = new ReentrantReadWriteLock(true)
+import scala.collection.mutable
 
-  val softAffinityAllocation = new SoftAffinityStrategy
+abstract class AffinityManager extends LogLevelUtil with Logging {
 
-  lazy val minOnTargetHosts = SparkEnv.get.conf.getInt(
-    GlutenConfig.GLUTEN_SOFT_AFFINITY_MIN_TARGET_HOSTS,
-    GlutenConfig.GLUTEN_SOFT_AFFINITY_MIN_TARGET_HOSTS_DEFAULT_VALUE
-  )
+  private val resourceRWLock = new ReentrantReadWriteLock(true)
+
+  private val softAffinityAllocation = new SoftAffinityStrategy
+
+  lazy val minOnTargetHosts: Int = GlutenConfig.GLUTEN_SOFT_AFFINITY_MIN_TARGET_HOSTS_DEFAULT_VALUE
 
   // (execId, host) list
   val fixedIdForExecutors = new mutable.ListBuffer[Option[(String, String)]]()
@@ -47,12 +43,9 @@ object SoftAffinityManager extends LogLevelUtil with Logging {
 
   protected val totalRegisteredExecutors = new AtomicInteger(0)
 
-  lazy val usingSoftAffinity = SparkEnv.get.conf.getBoolean(
-    GlutenConfig.GLUTEN_SOFT_AFFINITY_ENABLED,
-    GlutenConfig.GLUTEN_SOFT_AFFINITY_ENABLED_DEFAULT_VALUE
-  )
+  lazy val usingSoftAffinity: Boolean = true
 
-  private val softAffinityLogLevel = GlutenConfig.getConf.softAffinityLogLevel
+  lazy val logLevel: String = GlutenConfig.getConf.softAffinityLogLevel
 
   def totalExecutors(): Int = totalRegisteredExecutors.intValue()
 
@@ -60,11 +53,14 @@ object SoftAffinityManager extends LogLevelUtil with Logging {
     resourceRWLock.writeLock().lock()
     try {
       // first, check whether the execId exists
-      if (!fixedIdForExecutors.exists( exec => {
-        exec.isDefined && exec.get._1.equals(execHostId._1)
-      })) {
-        val executorsSet = nodesExecutorsMap.getOrElseUpdate(execHostId._2,
-          new mutable.HashSet[String]())
+      if (
+        !fixedIdForExecutors.exists(
+          exec => {
+            exec.isDefined && exec.get._1.equals(execHostId._1)
+          })
+      ) {
+        val executorsSet =
+          nodesExecutorsMap.getOrElseUpdate(execHostId._2, new mutable.HashSet[String]())
         executorsSet.add(execHostId._1)
         if (fixedIdForExecutors.exists(_.isEmpty)) {
           // replace the executor which was removed
@@ -75,7 +71,8 @@ object SoftAffinityManager extends LogLevelUtil with Logging {
         }
         totalRegisteredExecutors.addAndGet(1)
       }
-      logOnLevel(softAffinityLogLevel,
+      logOnLevel(
+        logLevel,
         s"After adding executor ${execHostId._1} on host ${execHostId._2}, " +
           s"fixedIdForExecutors is ${fixedIdForExecutors.mkString(",")}, " +
           s"nodesExecutorsMap is ${nodesExecutorsMap.keySet.mkString(",")}, " +
@@ -89,17 +86,18 @@ object SoftAffinityManager extends LogLevelUtil with Logging {
   def handleExecutorRemoved(execId: String): Unit = {
     resourceRWLock.writeLock().lock()
     try {
-      val execIdx = fixedIdForExecutors.indexWhere( execHost => {
-        if (execHost.isDefined) {
-          execHost.get._1.equals(execId)
-        } else {
-          false
-        }
-      })
+      val execIdx = fixedIdForExecutors.indexWhere(
+        execHost => {
+          if (execHost.isDefined) {
+            execHost.get._1.equals(execId)
+          } else {
+            false
+          }
+        })
       if (execIdx != -1) {
         val findedExecId = fixedIdForExecutors(execIdx)
         fixedIdForExecutors(execIdx) = None
-        val nodeExecs = nodesExecutorsMap.get(findedExecId.get._2).get
+        val nodeExecs = nodesExecutorsMap(findedExecId.get._2)
         nodeExecs -= findedExecId.get._1
         if (nodeExecs.isEmpty) {
           // there is no executor on this host, remove
@@ -107,10 +105,12 @@ object SoftAffinityManager extends LogLevelUtil with Logging {
         }
         totalRegisteredExecutors.addAndGet(-1)
       }
-      logOnLevel(softAffinityLogLevel, s"After removing executor ${execId}, " +
-        s"fixedIdForExecutors is ${fixedIdForExecutors.mkString(",")}, " +
-        s"nodesExecutorsMap is ${nodesExecutorsMap.keySet.mkString(",")}, " +
-        s"actual executors count is ${totalRegisteredExecutors.intValue()}."
+      logOnLevel(
+        logLevel,
+        s"After removing executor $execId, " +
+          s"fixedIdForExecutors is ${fixedIdForExecutors.mkString(",")}, " +
+          s"nodesExecutorsMap is ${nodesExecutorsMap.keySet.mkString(",")}, " +
+          s"actual executors count is ${totalRegisteredExecutors.intValue()}."
       )
     } finally {
       resourceRWLock.writeLock().unlock()
@@ -129,7 +129,7 @@ object SoftAffinityManager extends LogLevelUtil with Logging {
         // when the replication num of hdfs is less than 'minOnTargetHosts'
         val minHostsNum = Math.min(minOnTargetHosts, hosts.length)
         // there are how many the same hosts
-        nodesExecutorsMap.map(_._1).toArray.intersect(hosts).size >= minHostsNum
+        nodesExecutorsMap.keys.toArray.intersect(hosts).length >= minHostsNum
       }
     } finally {
       resourceRWLock.readLock().unlock()
@@ -148,4 +148,16 @@ object SoftAffinityManager extends LogLevelUtil with Logging {
       resourceRWLock.readLock().unlock()
     }
   }
+}
+
+object SoftAffinityManager extends AffinityManager {
+  override lazy val usingSoftAffinity: Boolean = SparkEnv.get.conf.getBoolean(
+    GlutenConfig.GLUTEN_SOFT_AFFINITY_ENABLED,
+    GlutenConfig.GLUTEN_SOFT_AFFINITY_ENABLED_DEFAULT_VALUE
+  )
+
+  override lazy val minOnTargetHosts: Int = SparkEnv.get.conf.getInt(
+    GlutenConfig.GLUTEN_SOFT_AFFINITY_MIN_TARGET_HOSTS,
+    GlutenConfig.GLUTEN_SOFT_AFFINITY_MIN_TARGET_HOSTS_DEFAULT_VALUE
+  )
 }

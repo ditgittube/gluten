@@ -14,19 +14,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.execution
 
-import com.google.common.collect.Lists
-import io.glutenproject.GlutenConfig
+import io.glutenproject.{GlutenConfig, GlutenNumaBindingInfo}
 import io.glutenproject.backendsapi.BackendsApiManager
+import io.glutenproject.exception.GlutenException
 import io.glutenproject.expression._
 import io.glutenproject.extension.GlutenPlan
-import io.glutenproject.metrics.{MetricsUpdater, NoopMetricsUpdater}
+import io.glutenproject.metrics.{GlutenTimeMetric, MetricsUpdater, NoopMetricsUpdater}
+import io.glutenproject.substrait.`type`.{TypeBuilder, TypeNode}
 import io.glutenproject.substrait.SubstraitContext
 import io.glutenproject.substrait.plan.{PlanBuilder, PlanNode}
-import io.glutenproject.substrait.rel.RelNode
+import io.glutenproject.substrait.rel.{RelNode, SplitInfo}
 import io.glutenproject.utils.SubstraitPlanPrinterUtil
+
+import org.apache.spark._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, SortOrder}
@@ -35,7 +37,8 @@ import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-import scala.collection.JavaConverters._
+import com.google.common.collect.Lists
+
 import scala.collection.mutable
 
 case class TransformContext(
@@ -43,13 +46,17 @@ case class TransformContext(
     outputAttributes: Seq[Attribute],
     root: RelNode)
 
-case class WholestageTransformContext(
-    inputAttributes: Seq[Attribute],
-    outputAttributes: Seq[Attribute],
-    root: PlanNode,
-    substraitContext: SubstraitContext = null)
+case class WholeStageTransformContext(root: PlanNode, substraitContext: SubstraitContext = null)
 
 trait TransformSupport extends GlutenPlan {
+
+  final override def doExecute(): RDD[InternalRow] = {
+    throw new UnsupportedOperationException(
+      s"${this.getClass.getSimpleName} doesn't support doExecute")
+  }
+
+  final override lazy val supportsColumnar: Boolean = true
+
   /**
    * Returns all the RDDs of ColumnarBatch which generates the input rows.
    *
@@ -58,10 +65,6 @@ trait TransformSupport extends GlutenPlan {
    */
   def columnarInputRDDs: Seq[RDD[ColumnarBatch]]
 
-  def getBuildPlans: Seq[(SparkPlan, SparkPlan)]
-
-  def getStreamedLeafPlan: SparkPlan
-
   def doTransform(context: SubstraitContext): TransformContext = {
     throw new UnsupportedOperationException(
       s"This operator doesn't support doTransform with SubstraitContext.")
@@ -69,7 +72,7 @@ trait TransformSupport extends GlutenPlan {
 
   def metricsUpdater(): MetricsUpdater
 
-  def getColumnarInputRDDs(plan: SparkPlan): Seq[RDD[ColumnarBatch]] = {
+  protected def getColumnarInputRDDs(plan: SparkPlan): Seq[RDD[ColumnarBatch]] = {
     plan match {
       case c: TransformSupport =>
         c.columnarInputRDDs
@@ -79,26 +82,73 @@ trait TransformSupport extends GlutenPlan {
   }
 }
 
-case class WholeStageTransformer(child: SparkPlan)(val transformStageId: Int)
-  extends UnaryExecNode with TransformSupport {
+trait LeafTransformSupport extends TransformSupport with LeafExecNode {
+  final override def columnarInputRDDs: Seq[RDD[ColumnarBatch]] = Seq.empty
+}
+
+trait UnaryTransformSupport extends TransformSupport with UnaryExecNode {
+  final override def columnarInputRDDs: Seq[RDD[ColumnarBatch]] = {
+    getColumnarInputRDDs(child)
+  }
+}
+
+case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = false)(
+    val transformStageId: Int
+) extends UnaryTransformSupport {
+  assert(child.isInstanceOf[TransformSupport])
 
   // For WholeStageCodegen-like operator, only pipeline time will be handled in graph plotting.
   // See SparkPlanGraph.scala:205 for reference.
   // Note: "metrics" is made transient to avoid sending driver-side metrics to tasks.
-  @transient override lazy val metrics =
+  @transient override lazy val metrics: Map[String, SQLMetric] =
     BackendsApiManager.getMetricsApiInstance.genWholeStageTransformerMetrics(sparkContext)
 
-  val sparkConf = sparkContext.getConf
-  val numaBindingInfo = GlutenConfig.getConf.numaBindingInfo
-  val substraitPlanLogLevel = GlutenConfig.getConf.substraitPlanLogLevel
+  val sparkConf: SparkConf = sparkContext.getConf
+  val numaBindingInfo: GlutenNumaBindingInfo = GlutenConfig.getConf.numaBindingInfo
+  val substraitPlanLogLevel: String = GlutenConfig.getConf.substraitPlanLogLevel
 
-  private var planJson: String = ""
+  @transient
+  private var wholeStageTransformerContext: Option[WholeStageTransformContext] = None
 
-  def getPlanJson: String = {
-    if (planJson.isEmpty) {
-      logWarning("Plan in JSON string is empty. This may due to the plan has not been executed.")
+  private var outputSchemaForPlan: Option[TypeNode] = None
+
+  private def inferSchemaFromAttributes(attrs: Seq[Attribute]): TypeNode = {
+    val outputTypeNodeList = new java.util.ArrayList[TypeNode]()
+    for (attr <- attrs) {
+      outputTypeNodeList.add(ConverterUtils.getTypeNode(attr.dataType, attr.nullable))
     }
-    planJson
+
+    TypeBuilder.makeStruct(false, outputTypeNodeList)
+  }
+
+  def setOutputSchemaForPlan(expectOutput: Seq[Attribute]): Unit = {
+    if (outputSchemaForPlan.isDefined) {
+      return
+    }
+
+    // Fixes issue-1874
+    outputSchemaForPlan = Some(inferSchemaFromAttributes(expectOutput))
+  }
+
+  def substraitPlan: PlanNode = {
+    if (wholeStageTransformerContext.isDefined) {
+      // TODO: remove this work around after we make `RelNode#toProtobuf` idempotent
+      //    see `SubstraitContext#initSplitInfosIndex`.
+      wholeStageTransformerContext.get.substraitContext.initSplitInfosIndex(0)
+      wholeStageTransformerContext.get.root
+    } else {
+      generateWholeStageTransformContext().root
+    }
+  }
+
+  def substraitPlanJson: String = {
+    SubstraitPlanPrinterUtil.substraitPlanToJson(substraitPlan.toProtobuf)
+  }
+
+  def nativePlanString(details: Boolean = true): String = {
+    BackendsApiManager.getTransformerApiInstance.getNativePlanString(
+      substraitPlan.toProtobuf.toByteArray,
+      details)
   }
 
   override def output: Seq[Attribute] = child.output
@@ -106,8 +156,6 @@ case class WholeStageTransformer(child: SparkPlan)(val transformStageId: Int)
   override def outputPartitioning: Partitioning = child.outputPartitioning
 
   override def outputOrdering: Seq[SortOrder] = child.outputOrdering
-
-  override def supportsColumnar: Boolean = GlutenConfig.getConf.enableColumnarIterator
 
   override def otherCopyArgs: Seq[AnyRef] = Seq(transformStageId.asInstanceOf[Integer])
 
@@ -128,13 +176,13 @@ case class WholeStageTransformer(child: SparkPlan)(val transformStageId: Int)
       append,
       verbose,
       prefix,
-      false,
+      addSuffix = false,
       maxFields,
-      printNodeId,
+      printNodeId = printNodeId,
       indent)
-    if (verbose && planJson.nonEmpty) {
+    if (verbose && wholeStageTransformerContext.isDefined) {
       append(prefix + "Substrait plan:\n")
-      append(planJson)
+      append(substraitPlanJson)
       append("\n")
     }
   }
@@ -144,43 +192,64 @@ case class WholeStageTransformer(child: SparkPlan)(val transformStageId: Int)
   // See buildSparkPlanGraphNode in SparkPlanGraph.scala of Spark.
   override def nodeName: String = s"WholeStageCodegenTransformer ($transformStageId)"
 
-  override def getBuildPlans: Seq[(SparkPlan, SparkPlan)] = {
-    child.asInstanceOf[TransformSupport].getBuildPlans
+  override def verboseStringWithOperatorId(): String = {
+    val nativePlan = if (conf.getConf(GlutenConfig.INJECT_NATIVE_PLAN_STRING_TO_EXPLAIN)) {
+      s"Native Plan:\n${nativePlanString()}"
+    } else {
+      ""
+    }
+    super.verboseStringWithOperatorId() ++ nativePlan
   }
 
-  override def doExecute(): RDD[InternalRow] = {
-    throw new UnsupportedOperationException("Row based execution is not supported")
-  }
-
-  def doWholestageTransform(): WholestageTransformContext = {
-    // invoke SparkPlan.prepare to do subquery preparation etc.
-    super.prepare()
-
+  private def generateWholeStageTransformContext(): WholeStageTransformContext = {
     val substraitContext = new SubstraitContext
     val childCtx = child
       .asInstanceOf[TransformSupport]
       .doTransform(substraitContext)
     if (childCtx == null) {
-      throw new NullPointerException(s"ColumnarWholestageTransformer can't doTansform on $child")
+      throw new NullPointerException(s"WholeStageTransformer can't do Transform on $child")
     }
+
     val outNames = new java.util.ArrayList[String]()
     for (attr <- childCtx.outputAttributes) {
       outNames.add(ConverterUtils.genColumnNameWithExprId(attr))
     }
-    val planNode =
+
+    val planNode = if (BackendsApiManager.getSettings.needOutputSchemaForPlan()) {
+      val outputSchema = if (outputSchemaForPlan.isDefined) {
+        outputSchemaForPlan.get
+      } else {
+        inferSchemaFromAttributes(childCtx.outputAttributes)
+      }
+
+      PlanBuilder.makePlan(
+        substraitContext,
+        Lists.newArrayList(childCtx.root),
+        outNames,
+        outputSchema,
+        null)
+    } else {
+      for (attr <- childCtx.outputAttributes) {
+        outNames.add(ConverterUtils.genColumnNameWithExprId(attr))
+      }
       PlanBuilder.makePlan(substraitContext, Lists.newArrayList(childCtx.root), outNames)
+    }
 
-    planJson = SubstraitPlanPrinterUtil.substraitPlanToJson(planNode.toProtobuf)
-
-    WholestageTransformContext(
-      childCtx.inputAttributes,
-      childCtx.outputAttributes,
-      planNode,
-      substraitContext)
+    WholeStageTransformContext(planNode, substraitContext)
   }
 
-  /** Find all BasicScanExecTransformers in one WholeStageTransformer */
-  def checkBatchScanExecTransformerChildren(): Seq[BasicScanExecTransformer] = {
+  def doWholeStageTransform(): WholeStageTransformContext = {
+    // invoke SparkPlan.prepare to do subquery preparation etc.
+    super.prepare()
+    val context = generateWholeStageTransformContext()
+    if (conf.getConf(GlutenConfig.CACHE_WHOLE_STAGE_TRANSFORMER_CONTEXT)) {
+      wholeStageTransformerContext = Some(context)
+    }
+    context
+  }
+
+  /** Find all BasicScanExecTransformer in one WholeStageTransformer */
+  private def findAllScanTransformers(): Seq[BasicScanExecTransformer] = {
     val basicScanExecTransformers = new mutable.ListBuffer[BasicScanExecTransformer]()
 
     def transformChildren(
@@ -193,6 +262,7 @@ case class WholeStageTransformer(child: SparkPlan)(val transformStageId: Int)
           case _ =>
         }
         // according to the substrait plan order
+        // SHJ may include two scans in a whole stage.
         plan match {
           case shj: HashJoinLikeExecTransformer =>
             transformChildren(shj.streamedPlan, basicScanExecTransformers)
@@ -205,63 +275,47 @@ case class WholeStageTransformer(child: SparkPlan)(val transformStageId: Int)
     }
 
     transformChildren(child, basicScanExecTransformers)
-    basicScanExecTransformers.toSeq
+    basicScanExecTransformers
   }
 
   override def doExecuteColumnar(): RDD[ColumnarBatch] = {
     val pipelineTime: SQLMetric = longMetric("pipelineTime")
-
-    val buildRelationBatchHolder: mutable.ListBuffer[ColumnarBatch] = mutable.ListBuffer()
-
-    val inputRDDs = columnarInputRDDs
+    val inputRDDs = new ColumnarInputRDDsWrapper(columnarInputRDDs)
     // Check if BatchScan exists.
-    val basicScanExecTransformers = checkBatchScanExecTransformerChildren()
+    val basicScanExecTransformers = findAllScanTransformers()
 
     if (basicScanExecTransformers.nonEmpty) {
 
       /**
        * If containing scan exec transformer this "whole stage" generates a RDD which itself takes
-       * care of SCAN there won't be any other RDD for SCAN as a result, genFirstStageIterator
+       * care of SCAN there won't be any other RDD for SCAN. As a result, genFirstStageIterator
        * rather than genFinalStageIterator will be invoked
        */
-      // the partition size of the all BasicScanExecTransformer must be the same
-      val allScanPartitions = basicScanExecTransformers.map(_.getFlattenPartitions)
-      val partitionLength = allScanPartitions.head.size
-      if (allScanPartitions.exists(_.size != partitionLength)) {
-        throw new RuntimeException(
-          "The partition length of all the scan transformer are not the same.")
-      }
-      val startTime = System.nanoTime()
-      val wsCxt = doWholestageTransform()
+      val allScanSplitInfos = getSplitInfosFromScanTransformer(basicScanExecTransformers)
 
-      // the file format for each scan exec
-      wsCxt.substraitContext.setFileFormat(
-        basicScanExecTransformers.map(ConverterUtils.getFileFormat).asJava)
+      val (wsCtx, inputPartitions) = GlutenTimeMetric.withMillisTime {
+        val wsCtx = doWholeStageTransform()
+        val partitions =
+          BackendsApiManager.getIteratorApiInstance.genPartitions(wsCtx, allScanSplitInfos)
 
-      // generate each partition of all scan exec
-      val substraitPlanPartitions = (0 until partitionLength).map(
-        i => {
-          val currentPartitions = allScanPartitions.map(_(i))
-          BackendsApiManager.getIteratorApiInstance
-            .genFilePartition(i, currentPartitions, wsCxt)
-        })
-
-      logOnLevel(
-        substraitPlanLogLevel,
-        s"Generating the Substrait plan took: ${(System.nanoTime() - startTime)} ns.")
+        (wsCtx, partitions)
+      }(
+        t =>
+          logOnLevel(
+            substraitPlanLogLevel,
+            s"$nodeName generating the substrait plan took: $t ms."))
 
       new GlutenWholeStageColumnarRDD(
         sparkContext,
-        substraitPlanPartitions,
-        wsCxt.outputAttributes,
-        genFirstNewRDDsForBroadcast(inputRDDs, partitionLength),
+        inputPartitions,
+        inputRDDs,
         pipelineTime,
         leafMetricsUpdater().updateInputMetrics,
         BackendsApiManager.getMetricsApiInstance.metricsUpdatingFunction(
           child,
-          wsCxt.substraitContext.registeredRelMap,
-          wsCxt.substraitContext.registeredJoinParams,
-          wsCxt.substraitContext.registeredAggregationParams
+          wsCtx.substraitContext.registeredRelMap,
+          wsCtx.substraitContext.registeredJoinParams,
+          wsCtx.substraitContext.registeredAggregationParams
         )
       )
     } else {
@@ -273,93 +327,118 @@ case class WholeStageTransformer(child: SparkPlan)(val transformStageId: Int)
        *      GlutenDataFrameAggregateSuite) in these cases, separate RDDs takes care of SCAN as a
        *      result, genFinalStageIterator rather than genFirstStageIterator will be invoked
        */
-      val startTime = System.nanoTime()
-      val resCtx = doWholestageTransform()
-
-      logOnLevel(substraitPlanLogLevel, s"Generating substrait plan:\n${planJson}")
-      logOnLevel(
-        substraitPlanLogLevel,
-        s"Generating the Substrait plan took: ${(System.nanoTime() - startTime)} ns.")
-
+      val resCtx = GlutenTimeMetric.withMillisTime(doWholeStageTransform()) {
+        t =>
+          logOnLevel(substraitPlanLogLevel, s"$nodeName generating the substrait plan took: $t ms.")
+      }
       new WholeStageZippedPartitionsRDD(
         sparkContext,
-        genFinalNewRDDsForBroadcast(inputRDDs),
+        inputRDDs,
         numaBindingInfo,
         sparkConf,
         resCtx,
         pipelineTime,
-        buildRelationBatchHolder,
         BackendsApiManager.getMetricsApiInstance.metricsUpdatingFunction(
           child,
           resCtx.substraitContext.registeredRelMap,
           resCtx.substraitContext.registeredJoinParams,
           resCtx.substraitContext.registeredAggregationParams
-        )
+        ),
+        materializeInput
       )
     }
-  }
-
-  override def getStreamedLeafPlan: SparkPlan = {
-    child.asInstanceOf[TransformSupport].getStreamedLeafPlan
   }
 
   override def metricsUpdater(): MetricsUpdater = {
     child match {
       case transformer: TransformSupport => transformer.metricsUpdater()
-      case _ => new NoopMetricsUpdater
+      case _ => NoopMetricsUpdater
     }
   }
 
-  def leafMetricsUpdater(): MetricsUpdater = {
-    getStreamedLeafPlan match {
-      case transformer: TransformSupport => transformer.metricsUpdater()
-      case _ => new NoopMetricsUpdater
-    }
-  }
-
-  override def columnarInputRDDs: Seq[RDD[ColumnarBatch]] = child match {
-    case c: TransformSupport =>
-      c.columnarInputRDDs
-    case _ =>
-      throw new UnsupportedOperationException
-  }
-
-  // Recreate the broadcast build side rdd with matched partition number.
-  // Used when whole stage transformer contains scan.
-  def genFirstNewRDDsForBroadcast(
-      rddSeq: Seq[RDD[ColumnarBatch]],
-      partitions: Int): Seq[RDD[ColumnarBatch]] = {
-    rddSeq.map {
-      case rdd: BroadcastBuildSideRDD =>
-        rdd.copy(numPartitions = partitions)
-      case inputRDD =>
-        inputRDD
-    }
-  }
-
-  // Recreate the broadcast build side rdd with matched partition number.
-  // Used when whole stage transformer does not contain scan.
-  def genFinalNewRDDsForBroadcast(rddSeq: Seq[RDD[ColumnarBatch]]): Seq[RDD[ColumnarBatch]] = {
-    // Get the number of partitions from a non-broadcast RDD.
-    val nonBroadcastRDD = rddSeq.find(rdd => !rdd.isInstanceOf[BroadcastBuildSideRDD])
-    if (nonBroadcastRDD.isEmpty) {
-      throw new RuntimeException("At least one RDD should not being BroadcastBuildSideRDD")
-    }
-    rddSeq.map {
-      case broadcastRDD: BroadcastBuildSideRDD =>
-        try {
-          broadcastRDD.getNumPartitions
-          broadcastRDD
-        } catch {
-          case _: Throwable =>
-            // Recreate the broadcast build side rdd with matched partition number.
-            broadcastRDD.copy(numPartitions = nonBroadcastRDD.orNull.getNumPartitions)
-        }
-      case rdd =>
-        rdd
-    }
+  private def leafMetricsUpdater(): MetricsUpdater = {
+    child
+      .find {
+        case t: TransformSupport if t.children.forall(!_.isInstanceOf[TransformSupport]) => true
+        case _ => false
+      }
+      .map(_.asInstanceOf[TransformSupport].metricsUpdater())
+      .getOrElse(NoopMetricsUpdater)
   }
 
   override protected def withNewChildInternal(newChild: SparkPlan): WholeStageTransformer =
-    copy(child = newChild)(transformStageId)
+    copy(child = newChild, materializeInput = materializeInput)(transformStageId)
+
+  private def getSplitInfosFromScanTransformer(
+      basicScanExecTransformers: Seq[BasicScanExecTransformer]): Seq[Seq[SplitInfo]] = {
+    // If these are two scan transformers, they must have same partitions,
+    // otherwise, exchange will be inserted. We should combine the two scan
+    // transformers' partitions with same index, and set them together in
+    // the substraitContext. We use transpose to do that, You can refer to
+    // the diagram below.
+    // scan1  p11 p12 p13 p14 ... p1n
+    // scan2  p21 p22 p23 p24 ... p2n
+    // transpose =>
+    // scan1 | scan2
+    //  p11  |  p21    => substraitContext.setSplitInfo([p11, p21])
+    //  p12  |  p22    => substraitContext.setSplitInfo([p11, p22])
+    //  p13  |  p23    ...
+    //  p14  |  p24
+    //      ...
+    //  p1n  |  p2n    => substraitContext.setSplitInfo([p1n, p2n])
+    val allScanSplitInfos = basicScanExecTransformers.map(_.getSplitInfos)
+    val partitionLength = allScanSplitInfos.head.size
+    if (allScanSplitInfos.exists(_.size != partitionLength)) {
+      throw new GlutenException(
+        "The partition length of all the scan transformer are not the same.")
+    }
+    allScanSplitInfos.transpose
+  }
+}
+
+/**
+ * This `columnarInputRDDs` would contain [[BroadcastBuildSideRDD]], but the dependency and
+ * partition of [[BroadcastBuildSideRDD]] is meaningless. [[BroadcastBuildSideRDD]] should only be
+ * used to hold the broadcast value and generate iterator for join.
+ */
+class ColumnarInputRDDsWrapper(columnarInputRDDs: Seq[RDD[ColumnarBatch]]) extends Serializable {
+  def getDependencies: Seq[Dependency[ColumnarBatch]] = {
+    assert(
+      columnarInputRDDs
+        .filterNot(_.isInstanceOf[BroadcastBuildSideRDD])
+        .map(_.partitions.length)
+        .toSet
+        .size <= 1)
+
+    columnarInputRDDs.flatMap {
+      case _: BroadcastBuildSideRDD => Nil
+      case rdd => new OneToOneDependency[ColumnarBatch](rdd) :: Nil
+    }
+  }
+
+  def getPartitions(index: Int): Seq[Partition] = {
+    columnarInputRDDs.filterNot(_.isInstanceOf[BroadcastBuildSideRDD]).map(_.partitions(index))
+  }
+
+  def getPartitionLength: Int = {
+    assert(columnarInputRDDs.nonEmpty)
+    val nonBroadcastRDD = columnarInputRDDs.find(!_.isInstanceOf[BroadcastBuildSideRDD])
+    assert(nonBroadcastRDD.isDefined)
+    nonBroadcastRDD.get.partitions.length
+  }
+
+  def getIterators(
+      inputColumnarRDDPartitions: Seq[Partition],
+      context: TaskContext): Seq[Iterator[ColumnarBatch]] = {
+    var index = 0
+    columnarInputRDDs.map {
+      case broadcast: BroadcastBuildSideRDD =>
+        BackendsApiManager.getIteratorApiInstance
+          .genBroadcastBuildSideIterator(broadcast.broadcasted, broadcast.broadCastContext)
+      case rdd =>
+        val it = rdd.iterator(inputColumnarRDDPartitions(index), context)
+        index += 1
+        it
+    }
+  }
 }

@@ -10,7 +10,7 @@ Object stores offered by CSPs such as AWS S3 are important for users of Gluten t
 
 ## Configuring S3 endpoint
 
-S3 proivdes the endpoint based method to access the files, here's the example configuration. Users may need to modify some values based on real setup.
+S3 provides the endpoint based method to access the files, here's the example configuration. Users may need to modify some values based on real setup.
 
 ```sh
 spark.hadoop.fs.s3a.impl                        org.apache.hadoop.fs.s3a.S3AFileSystem
@@ -22,8 +22,6 @@ spark.hadoop.fs.s3a.connection.ssl.enabled      true
 spark.hadoop.fs.s3a.path.style.access           false
 ```
 
-Note if testing with a mock AWS S3 environment(like Minio/Ceph), users may required to modify some of the values. E.g., on Minio setup, below config is required: `spark.hadoop.fs.s3a.path.style.access true`
-
 ## Configuring S3 instance credentials
 
 S3 also provides other methods for accessing, you can also use instance credentials by setting the following config
@@ -31,6 +29,7 @@ S3 also provides other methods for accessing, you can also use instance credenti
 ```
 spark.hadoop.fs.s3a.use.instance.credentials true
 ```
+Note that in this case, "spark.hadoop.fs.s3a.endpoint" won't take affect as Gluten will use the endpoint set during instance creation.
 
 ## Configuring S3 IAM roles
 You can also use iam role credentials by setting the following configurations. Instance credentials have higher priority than iam credentials.
@@ -46,6 +45,17 @@ Note that `spark.hadoop.fs.s3a.iam.role.session.name` is optional.
 
 - [AWS temporary credential](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp_request.html)
 
+## Log granularity of AWS C++ SDK in velox
+
+You can change log granularity of AWS C++ SDK by setting the `spark.gluten.velox.awsSdkLogLevel` configuration. The Allowed values are:
+* OFF
+* FATAL
+* ERROR
+* WARN
+* INFO
+* DEBUG
+* TRACE
+
 # Local Caching support
 
 Velox supports a local cache when reading data from HDFS/S3. The feature is very useful if remote storage is slow, e.g., reading from a public S3 bucket and stronger performance is desired. With this feature, Velox can asynchronously cache the data on local disk when reading from remote storage, and the future reading requests on already cached blocks will be serviced from local cache files. To enable the local caching feature, below configurations are required:
@@ -57,7 +67,7 @@ spark.gluten.sql.columnar.backend.velox.ssdCachePath      // the folder to store
 spark.gluten.sql.columnar.backend.velox.ssdCacheSize      // the total size of the SSD cache, default is 128MB. Velox will do in-mem cache only if this value is 0.
 spark.gluten.sql.columnar.backend.velox.ssdCacheShards    // the shards of the SSD cache, default is 1.
 spark.gluten.sql.columnar.backend.velox.ssdCacheIOThreads // the IO threads for cache promoting, default is 1. Velox will try to do "read-ahead" if this value is bigger than 1 
-spark.gluten.sql.columnar.backend.velox.ssdODirect        // enbale or disable O_DIRECT on cache write, default false.
+spark.gluten.sql.columnar.backend.velox.ssdODirect        // enable or disable O_DIRECT on cache write, default false.
 ```
 
 It's recommended to mount SSDs to the cache path to get the best performance of local caching. On the start up of Spark context, the cache files will be allocated under "spark.gluten.sql.columnar.backend.velox.cachePath", with UUID based suffix, e.g. "/tmp/cache.13e8ab65-3af4-46ac-8d28-ff99b2a9ec9b0". Gluten is not able to reuse older caches for now, and the old cache files are left there after Spark context shutdown.

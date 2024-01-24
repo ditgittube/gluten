@@ -14,73 +14,33 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.execution
 
-import java.util
-import com.google.common.collect.Lists
-import com.google.protobuf.Any
-import io.glutenproject.GlutenConfig
 import io.glutenproject.backendsapi.BackendsApiManager
 import io.glutenproject.expression.ConverterUtils
 import io.glutenproject.extension.ValidationResult
 import io.glutenproject.metrics.MetricsUpdater
+import io.glutenproject.substrait.`type`.TypeBuilder
 import io.glutenproject.substrait.SubstraitContext
-import io.glutenproject.substrait.`type`.{TypeBuilder, TypeNode}
 import io.glutenproject.substrait.extensions.ExtensionBuilder
-import io.glutenproject.substrait.plan.PlanBuilder
 import io.glutenproject.substrait.rel.{RelBuilder, RelNode}
-import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.Attribute
-import org.apache.spark.sql.execution.{SparkPlan, UnaryExecNode}
-import org.apache.spark.sql.vectorized.ColumnarBatch
 
-case class LimitTransformer(child: SparkPlan,
-                            offset: Long,
-                            count: Long)
-    extends UnaryExecNode with TransformSupport {
+import org.apache.spark.sql.catalyst.expressions.Attribute
+import org.apache.spark.sql.execution.SparkPlan
+
+import scala.collection.JavaConverters._
+
+case class LimitTransformer(child: SparkPlan, offset: Long, count: Long)
+  extends UnaryTransformSupport {
 
   // Note: "metrics" is made transient to avoid sending driver-side metrics to tasks.
   @transient override lazy val metrics =
     BackendsApiManager.getMetricsApiInstance.genLimitTransformerMetrics(sparkContext)
 
-  override def supportsColumnar: Boolean = true
-
   override def output: Seq[Attribute] = child.output
-
-  override def columnarInputRDDs: Seq[RDD[ColumnarBatch]] = child match {
-    case c: TransformSupport =>
-      c.columnarInputRDDs
-    case _ =>
-      Seq(child.executeColumnar())
-  }
-
-  override def getStreamedLeafPlan: SparkPlan = child match {
-    case c: TransformSupport =>
-      c.getStreamedLeafPlan
-    case _ =>
-      this
-  }
-
-  override def getBuildPlans: Seq[(SparkPlan, SparkPlan)] = child match {
-    case c: TransformSupport =>
-      val childPlans = c.getBuildPlans
-      childPlans :+ (this, null)
-    case _ =>
-      Seq((this, null))
-  }
 
   override protected def withNewChildInternal(newChild: SparkPlan): LimitTransformer =
     copy(child = newChild)
-
-  override protected def doExecute(): RDD[InternalRow] = {
-    throw new UnsupportedOperationException(s"ColumnarSortExec doesn't support doExecute")
-  }
-
-  override def doExecuteColumnar(): RDD[ColumnarBatch] = {
-    throw new UnsupportedOperationException(s"This operator doesn't support doExecuteColumnar().")
-  }
 
   override def metricsUpdater(): MetricsUpdater =
     BackendsApiManager.getMetricsApiInstance.genLimitTransformerMetricsUpdater(metrics)
@@ -88,56 +48,40 @@ case class LimitTransformer(child: SparkPlan,
   override protected def doValidateInternal(): ValidationResult = {
     val context = new SubstraitContext
     val operatorId = context.nextOperatorId(this.nodeName)
-    val relNode = getRelNode(context, operatorId, offset, count, child.output, null, true)
-    if (relNode != null && GlutenConfig.getConf.enableNativeValidation) {
-      val planNode = PlanBuilder.makePlan(context, Lists.newArrayList(relNode))
-      val validateInfo = BackendsApiManager.getValidatorApiInstance
-        .doValidateWithFallBackLog(planNode)
-      nativeValidationResult(validateInfo)
-    } else {
-      ok()
+    val input = child match {
+      // for sort + limit case
+      case c: TransformSupport => c.doTransform(context).root
+      case _ => null
     }
+    val relNode = getRelNode(context, operatorId, offset, count, child.output, input, true)
+
+    doNativeValidation(context, relNode)
   }
 
   override def doTransform(context: SubstraitContext): TransformContext = {
-    val childCtx = child match {
-      case c: TransformSupport => c.doTransform(context)
-      case _ => null
-    }
-
+    val childCtx = child.asInstanceOf[TransformSupport].doTransform(context)
     val operatorId = context.nextOperatorId(this.nodeName)
-    val relNode = if (childCtx != null) {
-      getRelNode(context, operatorId, offset, count, child.output, childCtx.root, false)
-    } else {
-      val attrList = new util.ArrayList[Attribute]()
-      for (attr <- child.output) {
-        attrList.add(attr)
-      }
-      val readRel = RelBuilder.makeReadRel(attrList, context, operatorId)
-      getRelNode(context, operatorId, offset, count, child.output, readRel, false)
-    }
+    val relNode = getRelNode(context, operatorId, offset, count, child.output, childCtx.root, false)
     TransformContext(child.output, child.output, relNode)
   }
 
-  def getRelNode(context: SubstraitContext,
-                 operatorId: Long,
-                 offset: Long,
-                 count: Long,
-                 inputAttributes: Seq[Attribute],
-                 input: RelNode,
-                 validation: Boolean): RelNode = {
+  def getRelNode(
+      context: SubstraitContext,
+      operatorId: Long,
+      offset: Long,
+      count: Long,
+      inputAttributes: Seq[Attribute],
+      input: RelNode,
+      validation: Boolean): RelNode = {
     if (!validation) {
       RelBuilder.makeFetchRel(input, offset, count, context, operatorId)
     } else {
-      val inputTypeNodes = new util.ArrayList[TypeNode]()
-      for (attr <- inputAttributes) {
-        inputTypeNodes.add(ConverterUtils.getTypeNode(attr.dataType, attr.nullable))
-      }
+      val inputTypeNodes =
+        inputAttributes.map(attr => ConverterUtils.getTypeNode(attr.dataType, attr.nullable)).asJava
       val extensionNode = ExtensionBuilder.makeAdvancedExtension(
-        Any.pack(TypeBuilder.makeStruct(false, inputTypeNodes).toProtobuf))
+        BackendsApiManager.getTransformerApiInstance.packPBMessage(
+          TypeBuilder.makeStruct(false, inputTypeNodes).toProtobuf))
       RelBuilder.makeFetchRel(input, offset, count, extensionNode, context, operatorId)
     }
   }
 }
-
-

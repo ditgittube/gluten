@@ -14,26 +14,26 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.memory.arrowalloc;
 
-import io.glutenproject.memory.GlutenMemoryConsumer;
-import io.glutenproject.memory.Spiller;
+import io.glutenproject.memory.memtarget.MemoryTargets;
+
 import org.apache.arrow.memory.AllocationListener;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.spark.memory.TaskMemoryManager;
 import org.apache.spark.util.TaskResource;
 import org.apache.spark.util.TaskResources;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Vector;
 
 public class ArrowBufferAllocators {
 
-  private ArrowBufferAllocators() {
-  }
+  private ArrowBufferAllocators() {}
 
   private static final BufferAllocator GLOBAL = new RootAllocator(Long.MAX_VALUE);
 
@@ -41,25 +41,43 @@ public class ArrowBufferAllocators {
     return GLOBAL;
   }
 
+  // FIXME: Remove this then use contextInstance(name) instead
   public static BufferAllocator contextInstance() {
+    return contextInstance("Default");
+  }
+
+  public static BufferAllocator contextInstance(String name) {
     if (!TaskResources.inSparkTask()) {
-      return globalInstance();
+      throw new IllegalStateException("This method must be called in a Spark task.");
     }
-    String id = ArrowBufferAllocatorManager.class.toString();
-    return TaskResources.addResourceIfNotRegistered(
-        id, ArrowBufferAllocatorManager::new).managed;
+    String id = "ArrowBufferAllocatorManager:" + name;
+    return TaskResources.addResourceIfNotRegistered(id, () -> new ArrowBufferAllocatorManager(name))
+        .managed;
   }
 
   public static class ArrowBufferAllocatorManager implements TaskResource {
     private static Logger LOGGER = LoggerFactory.getLogger(ArrowBufferAllocatorManager.class);
     private static final List<BufferAllocator> LEAKED = new Vector<>();
-    private final AllocationListener listener = new ManagedAllocationListener(
-        new GlutenMemoryConsumer(TaskResources.getLocalTaskContext().taskMemoryManager(),
-            Spiller.NO_OP),
-        TaskResources.getSharedMetrics());
+    private final AllocationListener listener;
+    private final String name;
+
+    {
+      final TaskMemoryManager tmm = TaskResources.getLocalTaskContext().taskMemoryManager();
+      listener =
+          new ManagedAllocationListener(
+              MemoryTargets.throwOnOom(
+                  MemoryTargets.newConsumer(
+                      tmm,
+                      "ArrowContextInstance",
+                      Collections.emptyList(),
+                      Collections.emptyMap())),
+              TaskResources.getSharedUsage());
+    }
+
     private final BufferAllocator managed = new RootAllocator(listener, Long.MAX_VALUE);
 
-    public ArrowBufferAllocatorManager() {
+    public ArrowBufferAllocatorManager(String name) {
+      this.name = name;
     }
 
     private void close() {
@@ -70,8 +88,11 @@ public class ArrowBufferAllocators {
       // move to leaked list
       long leakBytes = managed.getAllocatedMemory();
       long accumulated = TaskResources.ACCUMULATED_LEAK_BYTES().addAndGet(leakBytes);
-      LOGGER.warn(String.format("Detected leaked Arrow allocator, size: %d, " +
-          "process accumulated leaked size: %d...", leakBytes, accumulated));
+      LOGGER.warn(
+          String.format(
+              "Detected leaked Arrow allocator [%s], size: %d, "
+                  + "process accumulated leaked size: %d...",
+              resourceName(), leakBytes, accumulated));
       if (TaskResources.DEBUG()) {
         LOGGER.warn(String.format("Leaked allocator stack %s", managed.toVerboseString()));
         LEAKED.add(managed);
@@ -88,8 +109,13 @@ public class ArrowBufferAllocators {
     }
 
     @Override
-    public long priority() {
-      return 0L; // lowest priority
+    public int priority() {
+      return 0; // lowest priority
+    }
+
+    @Override
+    public String resourceName() {
+      return name;
     }
   }
 }

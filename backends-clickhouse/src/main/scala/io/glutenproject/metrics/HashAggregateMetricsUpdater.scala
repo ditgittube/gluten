@@ -19,6 +19,8 @@ package io.glutenproject.metrics
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.execution.metric.SQLMetric
 
+import scala.collection.JavaConverters._
+
 class HashAggregateMetricsUpdater(val metrics: Map[String, SQLMetric])
   extends MetricsUpdater
   with Logging {
@@ -31,15 +33,6 @@ class HashAggregateMetricsUpdater(val metrics: Map[String, SQLMetric])
           val aggregationParams = operatorMetrics.aggParams
           var currentIdx = operatorMetrics.metricsList.size() - 1
           var totalTime = 0L
-
-          // read rel
-          if (aggregationParams.isReadRel) {
-            metrics("iterReadTime") +=
-              (operatorMetrics.metricsList.get(currentIdx).time / 1000L).toLong
-            metrics("outputVectors") += operatorMetrics.metricsList.get(currentIdx).outputVectors
-            totalTime += operatorMetrics.metricsList.get(currentIdx).time
-            currentIdx -= 1
-          }
 
           // pre projection
           if (aggregationParams.preProjectionNeeded) {
@@ -69,6 +62,14 @@ class HashAggregateMetricsUpdater(val metrics: Map[String, SQLMetric])
             HashAggregateMetricsUpdater.CH_PLAN_NODE_NAME
           )
 
+          val resizeStep = aggMetricsData.steps.asScala
+            .flatMap(_.processors.asScala)
+            .find(s => s.getName.equalsIgnoreCase("Resize"))
+          if (!resizeStep.isEmpty) {
+            metrics("resizeInputRows") += resizeStep.get.inputRows
+            metrics("resizeOutputRows") += aggMetricsData.getOutputRows
+          }
+
           currentIdx -= 1
 
           // post projection
@@ -91,6 +92,14 @@ class HashAggregateMetricsUpdater(val metrics: Map[String, SQLMetric])
 }
 
 object HashAggregateMetricsUpdater {
-  val INCLUDING_PROCESSORS = Array("AggregatingTransform", "MergingAggregatedTransform")
-  val CH_PLAN_NODE_NAME = Array("AggregatingTransform", "MergingAggregatedTransform")
+  val INCLUDING_PROCESSORS = Array(
+    "AggregatingTransform",
+    "StreamingAggregatingTransform",
+    "MergingAggregatedTransform",
+    "GraceMergingAggregatedTransform")
+  val CH_PLAN_NODE_NAME = Array(
+    "AggregatingTransform",
+    "StreamingAggregatingTransform",
+    "MergingAggregatedTransform",
+    "GraceMergingAggregatedTransform")
 }

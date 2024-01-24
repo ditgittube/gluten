@@ -14,7 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.substrait.expression;
 
 import io.glutenproject.expression.ConverterUtils;
@@ -25,7 +24,6 @@ import org.apache.spark.sql.catalyst.util.ArrayData;
 import org.apache.spark.sql.catalyst.util.MapData;
 import org.apache.spark.sql.types.*;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -207,7 +205,8 @@ public class ExpressionBuilder {
       return makeStructLiteral((InternalRow) obj, typeNode);
     }
     throw new UnsupportedOperationException(
-        String.format("Type not supported: %s, obj: %s, class: %s",
+        String.format(
+            "Type not supported: %s, obj: %s, class: %s",
             typeNode.toString(), obj.toString(), obj.getClass().toString()));
   }
 
@@ -219,13 +218,13 @@ public class ExpressionBuilder {
   public static void checkDecimalScale(int scale) {
     if (scale < 0) {
       // Substrait don't support decimal type with negative scale.
-      throw new UnsupportedOperationException(String.format(
-        "DecimalType with negative scale not supported: %s.", scale));
+      throw new UnsupportedOperationException(
+          String.format("DecimalType with negative scale not supported: %s.", scale));
     }
   }
 
   public static ScalarFunctionNode makeScalarFunction(
-      Long functionId, ArrayList<ExpressionNode> expressionNodes, TypeNode typeNode) {
+      Long functionId, List<ExpressionNode> expressionNodes, TypeNode typeNode) {
     return new ScalarFunctionNode(functionId, expressionNodes, typeNode);
   }
 
@@ -239,14 +238,14 @@ public class ExpressionBuilder {
 
   public static AggregateFunctionNode makeAggregateFunction(
       Long functionId,
-      ArrayList<ExpressionNode> expressionNodes,
+      List<ExpressionNode> expressionNodes,
       String phase,
       TypeNode outputTypeNode) {
     return new AggregateFunctionNode(functionId, expressionNodes, phase, outputTypeNode);
   }
 
-  public static CastNode makeCast(TypeNode typeNode, ExpressionNode expressionNode,
-                                  boolean ansiEnabled) {
+  public static CastNode makeCast(
+      TypeNode typeNode, ExpressionNode expressionNode, boolean ansiEnabled) {
     return new CastNode(typeNode, expressionNode, ansiEnabled);
   }
 
@@ -254,20 +253,20 @@ public class ExpressionBuilder {
     return new StringMapNode(values);
   }
 
-  public static SingularOrListNode makeSingularOrListNode(ExpressionNode value,
-                                                          List<ExpressionNode> expressionNodes) {
+  public static SingularOrListNode makeSingularOrListNode(
+      ExpressionNode value, List<ExpressionNode> expressionNodes) {
     return new SingularOrListNode(value, expressionNodes);
   }
 
   public static WindowFunctionNode makeWindowFunction(
       Integer functionId,
-      ArrayList<ExpressionNode> expressionNodes,
+      List<ExpressionNode> expressionNodes,
       String columnName,
       TypeNode outputTypeNode,
       String upperBound,
       String lowerBound,
       String frameType) {
-    return new WindowFunctionNode(functionId, expressionNodes, columnName,
-        outputTypeNode, upperBound, lowerBound, frameType);
+    return new WindowFunctionNode(
+        functionId, expressionNodes, columnName, outputTypeNode, upperBound, lowerBound, frameType);
   }
 }

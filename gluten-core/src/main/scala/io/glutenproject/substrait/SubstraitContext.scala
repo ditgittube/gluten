@@ -14,25 +14,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.substrait
 
-import java.security.InvalidParameterException
-import java.util
-
 import io.glutenproject.substrait.ddlplan.InsertOutputNode
-import io.glutenproject.substrait.rel.LocalFilesNode
 import io.glutenproject.substrait.rel.LocalFilesNode.ReadFileFormat
+import io.glutenproject.substrait.rel.SplitInfo
+
+import java.lang.{Integer => JInt, Long => JLong}
+import java.security.InvalidParameterException
+import java.util.{ArrayList => JArrayList, HashMap => JHashMap, List => JList, Map => JMap}
 
 case class JoinParams() {
-  // Whether the input of streamed side is a ReadRel represented iterator.
-  var isStreamedReadRel = false
-
   // Whether preProjection is needed in streamed side.
   var streamPreProjectionNeeded = false
-
-  // Whether the input of build side is a ReadRel represented iterator.
-  var isBuildReadRel = false
 
   // Whether preProjection is needed in build side.
   var buildPreProjectionNeeded = false
@@ -48,9 +42,6 @@ case class JoinParams() {
 }
 
 case class AggregationParams() {
-  // Whether the input is a ReadRel represented iterator.
-  var isReadRel = false
-
   // Whether preProjection is needed.
   var preProjectionNeeded = false
 
@@ -63,123 +54,114 @@ case class AggregationParams() {
 
 class SubstraitContext extends Serializable {
   // A map stores the relationship between function name and function id.
-  private val functionMap = new java.util.HashMap[String, java.lang.Long]()
-
-  // A map stores the relationship between id and local file node.
-  private val iteratorNodes = new java.util.HashMap[java.lang.Long, LocalFilesNode]()
+  private val functionMap = new JHashMap[String, JLong]()
 
   // A map stores the relationship between Spark operator id and its respective Substrait Rel ids.
-  private val operatorToRelsMap = new java.util.HashMap[
-    java.lang.Long, java.util.ArrayList[java.lang.Long]]()
+  private val operatorToRelsMap: JMap[JLong, JList[JLong]] = new JHashMap[JLong, JList[JLong]]()
 
   // Only for debug conveniently
-  private val operatorToPlanNameMap = new java.util.HashMap[java.lang.Long, java.lang.String]()
+  private val operatorToPlanNameMap = new JHashMap[JLong, String]()
 
   // A map stores the relationship between join operator id and its param.
-  private val joinParamsMap = new java.util.HashMap[java.lang.Long, JoinParams]()
+  private val joinParamsMap = new JHashMap[JLong, JoinParams]()
 
   // A map stores the relationship between aggregation operator id and its param.
-  private val aggregationParamsMap = new java.util.HashMap[java.lang.Long, AggregationParams]()
+  private val aggregationParamsMap = new JHashMap[JLong, AggregationParams]()
 
-  private var localFilesNodesIndex: java.lang.Integer = new java.lang.Integer(0)
-  private var localFilesNodes: Seq[java.io.Serializable] = _
-  private var iteratorIndex: java.lang.Long = new java.lang.Long(0L)
-  private var fileFormat: java.util.List[ReadFileFormat] =
-    new java.util.ArrayList[ReadFileFormat]()
+  private var splitInfosIndex: JInt = 0
+  private var splitInfos: Seq[SplitInfo] = _
+  private var iteratorIndex: JLong = 0L
+  private var fileFormat: JList[ReadFileFormat] = new JArrayList[ReadFileFormat]()
   private var insertOutputNode: InsertOutputNode = _
-  private var operatorId: java.lang.Long = new java.lang.Long(0L)
-  private var relId: java.lang.Long = new java.lang.Long(0L)
+  private var operatorId: JLong = 0L
+  private var relId: JLong = 0L
 
-  def getFileFormat: java.util.List[ReadFileFormat] = this.fileFormat
-
-  def setFileFormat(format: java.util.List[ReadFileFormat]): Unit = {
-    this.fileFormat = format
+  def initSplitInfosIndex(splitInfosIndex: JInt): Unit = {
+    this.splitInfosIndex = splitInfosIndex
   }
 
-  def setIteratorNode(index: java.lang.Long, localFilesNode: LocalFilesNode): Unit = {
-    if (iteratorNodes.containsKey(index)) {
-      throw new IllegalStateException(s"Iterator index ${index} has been used.")
-    }
-    iteratorNodes.put(index, localFilesNode)
-  }
-
-  def initLocalFilesNodesIndex(localFilesNodesIndex: java.lang.Integer): Unit = {
-    this.localFilesNodesIndex = localFilesNodesIndex
-  }
-
-  def getLocalFilesNodes: Seq[java.io.Serializable] = this.localFilesNodes
+  def getSplitInfos: Seq[SplitInfo] = splitInfos
 
   // FIXME Hongze 22/11/28
   // This makes calls to ReadRelNode#toProtobuf non-idempotent which doesn't seem to be
   // optimal in regard to the method name "toProtobuf".
-  def getCurrentLocalFileNode: java.io.Serializable = {
-    if (getLocalFilesNodes != null && getLocalFilesNodes.size > localFilesNodesIndex) {
-      val res = getLocalFilesNodes(localFilesNodesIndex)
-      localFilesNodesIndex += 1
+  def getCurrentSplitInfo: SplitInfo = {
+    if (getSplitInfos != null && getSplitInfos.size > splitInfosIndex) {
+      val res = getSplitInfos(splitInfosIndex)
+      splitInfosIndex += 1
       res
     } else {
       throw new IllegalStateException(
-        s"LocalFilesNodes index ${localFilesNodesIndex} exceeds the size of the LocalFilesNodes.")
+        s"LocalFilesNodes index $splitInfosIndex exceeds the size of the LocalFilesNodes.")
     }
   }
 
-  def setLocalFilesNodes(localFilesNodes: Seq[java.io.Serializable]): Unit = {
-    this.localFilesNodes = localFilesNodes
+  def setSplitInfos(SplitInfos: Seq[SplitInfo]): Unit = {
+    this.splitInfos = SplitInfos
   }
 
-  def getInputIteratorNode(index: java.lang.Long): LocalFilesNode = {
-    iteratorNodes.get(index)
-  }
-
-  def getInsertOutputNode: InsertOutputNode = this.insertOutputNode
+  def getInsertOutputNode: InsertOutputNode = insertOutputNode
 
   def setInsertOutputNode(insertOutputNode: InsertOutputNode): Unit = {
     this.insertOutputNode = insertOutputNode
   }
 
-  def registerFunction(funcName: String): java.lang.Long = {
+  def registerFunction(funcName: String): JLong = {
     if (!functionMap.containsKey(funcName)) {
-      val newFunctionId: java.lang.Long = functionMap.size.toLong
+      val newFunctionId: JLong = functionMap.size.toLong
       functionMap.put(funcName, newFunctionId)
       newFunctionId
-    }
-    else {
+    } else {
       functionMap.get(funcName)
     }
   }
 
-  def registeredFunction: java.util.HashMap[String, java.lang.Long] = functionMap
+  def registeredFunction: JHashMap[String, JLong] = functionMap
 
-  def nextIteratorIndex: java.lang.Long = {
+  def nextIteratorIndex: JLong = {
     val id = this.iteratorIndex
     this.iteratorIndex += 1
     id
   }
 
+  def currentIteratorIndex: JLong = {
+    assert(iteratorIndex > 0)
+    this.iteratorIndex - 1
+  }
+
   /**
    * Register a rel to certain operator id.
-   * @param operatorId operator id
+   * @param operatorId
+   *   operator id
    */
-  def registerRelToOperator(operatorId: java.lang.Long): Unit = {
+  def registerRelToOperator(operatorId: JLong): Unit = {
     if (operatorToRelsMap.containsKey(operatorId)) {
       val rels = operatorToRelsMap.get(operatorId)
       rels.add(relId)
     } else {
-      val rels = new util.ArrayList[java.lang.Long]()
+      val rels = new JArrayList[JLong]()
       rels.add(relId)
       operatorToRelsMap.put(operatorId, rels)
     }
     relId += 1
   }
 
+  /** Add the relId and register to operator later */
+  def nextRelId(): JLong = {
+    val id = this.relId
+    this.relId += 1
+    id
+  }
+
   /**
    * Register empty rel list to certain operator id. Used when the computing of a Spark transformer
    * is omitted.
-   * @param operatorId operator id
+   * @param operatorId
+   *   operator id
    */
-  def registerEmptyRelToOperator(operatorId: java.lang.Long): Unit = {
+  def registerEmptyRelToOperator(operatorId: JLong): Unit = {
     if (!operatorToRelsMap.containsKey(operatorId)) {
-      val rels = new util.ArrayList[java.lang.Long]()
+      val rels = new JArrayList[JLong]()
       operatorToRelsMap.put(operatorId, rels)
     }
   }
@@ -188,15 +170,16 @@ class SubstraitContext extends Serializable {
    * Return the registered map.
    * @return
    */
-  def registeredRelMap: java.util.HashMap[java.lang.Long, java.util.ArrayList[java.lang.Long]] =
-    operatorToRelsMap
+  def registeredRelMap: JMap[JLong, JList[JLong]] = operatorToRelsMap
 
   /**
    * Register the join params to certain operator id.
-   * @param operatorId operator id
-   * @param param join params
+   * @param operatorId
+   *   operator id
+   * @param param
+   *   join params
    */
-  def registerJoinParam(operatorId: java.lang.Long, param: JoinParams): Unit = {
+  def registerJoinParam(operatorId: JLong, param: JoinParams): Unit = {
     if (joinParamsMap.containsKey(operatorId)) {
       throw new InvalidParameterException("Join param has already been registered.")
     } else {
@@ -208,14 +191,16 @@ class SubstraitContext extends Serializable {
    * return the registered map
    * @return
    */
-  def registeredJoinParams: java.util.HashMap[java.lang.Long, JoinParams] = this.joinParamsMap
+  def registeredJoinParams: JHashMap[JLong, JoinParams] = joinParamsMap
 
   /**
    * Register the aggregation params to certain operator id.
-   * @param operatorId operator id
-   * @param param aggregation params
+   * @param operatorId
+   *   operator id
+   * @param param
+   *   aggregation params
    */
-  def registerAggregationParam(operatorId: java.lang.Long, param: AggregationParams): Unit = {
+  def registerAggregationParam(operatorId: JLong, param: AggregationParams): Unit = {
     if (aggregationParamsMap.containsKey(operatorId)) {
       throw new InvalidParameterException("Aggregation param has already been registered.")
     } else {
@@ -227,19 +212,15 @@ class SubstraitContext extends Serializable {
    * return the registered map
    * @return
    */
-  def registeredAggregationParams: java.util.HashMap[java.lang.Long, AggregationParams] =
-    this.aggregationParamsMap
+  def registeredAggregationParams: JHashMap[JLong, AggregationParams] = aggregationParamsMap
 
-  def nextOperatorId(planName: String): java.lang.Long = {
+  def nextOperatorId(planName: String): JLong = {
     val id = this.operatorId
     operatorToPlanNameMap.put(id, planName)
     this.operatorId += 1
     id
   }
 
-  /**
-   * Only for debug the plan id and plan name in `operatorToRelsMap`
-   */
-  def getOperatorToPlanNameMap: java.util.HashMap[java.lang.Long, java.lang.String] =
-    operatorToPlanNameMap
+  /** Only for debug the plan id and plan name in `operatorToRelsMap` */
+  def getOperatorToPlanNameMap: JHashMap[JLong, String] = operatorToPlanNameMap
 }

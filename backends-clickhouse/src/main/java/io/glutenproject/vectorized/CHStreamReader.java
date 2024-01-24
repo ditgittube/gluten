@@ -14,8 +14,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.vectorized;
+
+import io.glutenproject.backendsapi.clickhouse.CHBackendSettings;
 
 import org.apache.spark.storage.CHShuffleReadStreamFactory;
 
@@ -24,29 +25,27 @@ import java.io.InputStream;
 public class CHStreamReader implements AutoCloseable {
   private final ShuffleInputStream inputStream;
   private long nativeShuffleReader;
-  private boolean compressed;
-  private int bufferSize;
-
-  public CHStreamReader(InputStream inputStream, int bufferSize) {
-    this(inputStream, false, false, bufferSize);
-  }
 
   public CHStreamReader(
-      InputStream inputStream,
-      boolean forceCompress,
-      boolean isCustomizedShuffleCodec,
-      int bufferSize) {
-    this.bufferSize = bufferSize;
-    this.inputStream =
-        CHShuffleReadStreamFactory.create(
-            inputStream, forceCompress, isCustomizedShuffleCodec, bufferSize);
-    this.compressed = this.inputStream.isCompressed();
+      InputStream inputStream, boolean forceCompress, boolean isCustomizedShuffleCodec) {
+    this(CHShuffleReadStreamFactory.create(inputStream, forceCompress, isCustomizedShuffleCodec));
+  }
+
+  public CHStreamReader(ShuffleInputStream shuffleInputStream) {
+    inputStream = shuffleInputStream;
     nativeShuffleReader =
-        createNativeShuffleReader(this.inputStream, this.compressed, this.bufferSize);
+        createNativeShuffleReader(
+            this.inputStream,
+            inputStream.isCompressed(),
+            CHBackendSettings.maxShuffleReadRows(),
+            CHBackendSettings.maxShuffleReadBytes());
   }
 
   private static native long createNativeShuffleReader(
-      ShuffleInputStream inputStream, boolean compressed, int bufferSize);
+      ShuffleInputStream inputStream,
+      boolean compressed,
+      long maxShuffleReadRows,
+      long maxShuffleReadBytes);
 
   private native long nativeNext(long nativeShuffleReader);
 

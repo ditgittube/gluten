@@ -24,10 +24,17 @@
 namespace gluten {
 
 // store configurations that are general to all backend types
+const std::string kDebugModeEnabled = "spark.gluten.sql.debug";
 
 const std::string kGlutenSaveDir = "spark.gluten.saveDir";
 
 const std::string kCaseSensitive = "spark.sql.caseSensitive";
+
+const std::string kLegacySize = "spark.sql.legacy.sizeOfNull";
+
+const std::string kSessionTimezone = "spark.sql.session.timeZone";
+
+const std::string kDefaultSessionTimezone = "spark.gluten.sql.session.timeZone.default";
 
 const std::string kSparkOffHeapMemory = "spark.gluten.memory.offHeap.size.in.bytes";
 
@@ -39,10 +46,20 @@ const std::string kParquetBlockSize = "parquet.block.size";
 
 const std::string kParquetBlockRows = "parquet.block.rows";
 
+const std::string kParquetGzipWindowSize = "parquet.gzip.windowSize";
+const std::string kGzipWindowSize4k = "4096";
+
 const std::string kParquetCompressionCodec = "spark.sql.parquet.compression.codec";
 
 const std::string kUGIUserName = "spark.gluten.ugi.username";
 const std::string kUGITokens = "spark.gluten.ugi.tokens";
 
-std::unordered_map<std::string, std::string> getConfMap(JNIEnv* env, jbyteArray planArray);
+const std::string kShuffleCompressionCodec = "spark.gluten.sql.columnar.shuffle.codec";
+const std::string kShuffleCompressionCodecBackend = "spark.gluten.sql.columnar.shuffle.codecBackend";
+const std::string kQatBackendName = "qat";
+const std::string kIaaBackendName = "iaa";
+
+std::unordered_map<std::string, std::string> parseConfMap(JNIEnv* env, jbyteArray configArray);
+
+std::string printConfig(const std::unordered_map<std::string, std::string>& conf);
 } // namespace gluten

@@ -14,24 +14,29 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.substrait.expression;
 
 import io.glutenproject.substrait.type.TypeNode;
+
 import io.substrait.proto.AggregateFunction;
 import io.substrait.proto.AggregationPhase;
 import io.substrait.proto.FunctionArgument;
+
 import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.List;
 
 public class AggregateFunctionNode implements Serializable {
   private final Long functionId;
-  private final ArrayList<ExpressionNode> expressionNodes = new ArrayList<>();
+  private final List<ExpressionNode> expressionNodes = new ArrayList<>();
   private final String phase;
   private final TypeNode outputTypeNode;
 
-  AggregateFunctionNode(Long functionId, ArrayList<ExpressionNode> expressionNodes,
-                        String phase, TypeNode outputTypeNode) {
+  AggregateFunctionNode(
+      Long functionId,
+      List<ExpressionNode> expressionNodes,
+      String phase,
+      TypeNode outputTypeNode) {
     this.functionId = functionId;
     this.expressionNodes.addAll(expressionNodes);
     this.phase = phase;
@@ -56,7 +61,7 @@ public class AggregateFunctionNode implements Serializable {
           aggBuilder.setPhase(AggregationPhase.AGGREGATION_PHASE_INTERMEDIATE_TO_RESULT);
           break;
         default:
-          aggBuilder.setPhase(AggregationPhase.AGGREGATION_PHASE_UNSPECIFIED);
+          aggBuilder.setPhase(AggregationPhase.AGGREGATION_PHASE_INITIAL_TO_RESULT);
       }
     }
     for (ExpressionNode expressionNode : expressionNodes) {

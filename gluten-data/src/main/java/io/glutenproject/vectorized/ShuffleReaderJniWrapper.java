@@ -14,22 +14,38 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.vectorized;
 
-import io.glutenproject.init.JniInitialized;
+import io.glutenproject.exec.Runtime;
+import io.glutenproject.exec.RuntimeAware;
+import io.glutenproject.exec.Runtimes;
 
-public class ShuffleReaderJniWrapper extends JniInitialized {
-  public static final ShuffleReaderJniWrapper INSTANCE = new ShuffleReaderJniWrapper();
+public class ShuffleReaderJniWrapper implements RuntimeAware {
+  private final Runtime runtime;
 
-  private ShuffleReaderJniWrapper() {
+  private ShuffleReaderJniWrapper(Runtime runtime) {
+    this.runtime = runtime;
   }
 
-  public native long make(JniByteInputStream jniIn, long cSchema, long allocatorId);
+  public static ShuffleReaderJniWrapper create() {
+    return new ShuffleReaderJniWrapper(Runtimes.contextInstance());
+  }
 
-  public native long next(long handle);
+  @Override
+  public long handle() {
+    return runtime.getHandle();
+  }
 
-  public native void populateMetrics(long handle, ShuffleReaderMetrics metrics);
-  public native void close(long handle);
+  public native long make(
+      long cSchema,
+      long memoryManagerHandle,
+      String compressionType,
+      String compressionCodecBackend,
+      int batchSize);
 
+  public native long readStream(long shuffleReaderHandle, JniByteInputStream jniIn);
+
+  public native void populateMetrics(long shuffleReaderHandle, ShuffleReaderMetrics metrics);
+
+  public native void close(long shuffleReaderHandle);
 }

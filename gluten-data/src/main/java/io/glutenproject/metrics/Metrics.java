@@ -14,8 +14,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.metrics;
+
+import io.glutenproject.exception.GlutenException;
 
 public class Metrics implements IMetrics {
   public long[] inputRows;
@@ -43,11 +44,17 @@ public class Metrics implements IMetrics {
   public long[] processedSplits;
   public long[] skippedStrides;
   public long[] processedStrides;
+  public long[] remainingFilterTime;
+  public long[] ioWaitTime;
+  public long[] preloadSplits;
+
+  public long[] physicalWrittenBytes;
+
+  public long[] numWrittenFiles;
+
   public SingleMetric singleMetric = new SingleMetric();
 
-  /**
-   * Create an instance for native metrics.
-   */
+  /** Create an instance for native metrics. */
   public Metrics(
       long[] inputRows,
       long[] inputVectors,
@@ -74,7 +81,12 @@ public class Metrics implements IMetrics {
       long[] skippedSplits,
       long[] processedSplits,
       long[] skippedStrides,
-      long[] processedStrides) {
+      long[] processedStrides,
+      long[] remainingFilterTime,
+      long[] ioWaitTime,
+      long[] preloadSplits,
+      long[] physicalWrittenBytes,
+      long[] numWrittenFiles) {
     this.inputRows = inputRows;
     this.inputVectors = inputVectors;
     this.inputBytes = inputBytes;
@@ -101,11 +113,16 @@ public class Metrics implements IMetrics {
     this.processedSplits = processedSplits;
     this.skippedStrides = skippedStrides;
     this.processedStrides = processedStrides;
+    this.remainingFilterTime = remainingFilterTime;
+    this.ioWaitTime = ioWaitTime;
+    this.preloadSplits = preloadSplits;
+    this.physicalWrittenBytes = physicalWrittenBytes;
+    this.numWrittenFiles = numWrittenFiles;
   }
 
   public OperatorMetrics getOperatorMetrics(int index) {
     if (index >= inputRows.length) {
-      throw new RuntimeException("Invalid index.");
+      throw new GlutenException("Invalid index.");
     }
 
     return new OperatorMetrics(
@@ -133,7 +150,12 @@ public class Metrics implements IMetrics {
         skippedSplits[index],
         processedSplits[index],
         skippedStrides[index],
-        processedStrides[index]);
+        processedStrides[index],
+        remainingFilterTime[index],
+        ioWaitTime[index],
+        preloadSplits[index],
+        physicalWrittenBytes[index],
+        numWrittenFiles[index]);
   }
 
   public SingleMetric getSingleMetrics() {

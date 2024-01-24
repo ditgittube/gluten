@@ -21,7 +21,6 @@ import io.glutenproject.expression.ConverterUtils.FunctionConfig
 import io.glutenproject.substrait.`type`._
 import io.glutenproject.substrait.expression._
 
-import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
@@ -35,8 +34,7 @@ case class CHSha1Transformer(
     substraitExprName: String,
     child: ExpressionTransformer,
     original: Sha1)
-  extends Sha1Transformer(substraitExprName, child, original)
-  with Logging {
+  extends ExpressionTransformer {
 
   override def doTransform(args: java.lang.Object): ExpressionNode = {
     // Spark sha1(child) = CH lower(hex(sha1(child)))
@@ -79,8 +77,7 @@ case class CHSha2Transformer(
     left: ExpressionTransformer,
     right: ExpressionTransformer,
     original: Sha2)
-  extends Sha2Transformer(substraitExprName, left, right, original)
-  with Logging {
+  extends ExpressionTransformer {
   override def doTransform(args: java.lang.Object): ExpressionNode = {
     // bitLength must be literal for CH backend
     val rightNode = right.doTransform(args)
@@ -225,7 +222,7 @@ case class CHSizeExpressionTransformer(
 
   override def doTransform(args: java.lang.Object): ExpressionNode = {
 
-    if (SQLConf.get.legacySizeOfNull) {
+    if (original.legacySizeOfNull) {
       // when legacySizeOfNull is true, size(null) should return -1
       // so we wrap it to if(isnull(child), -1, size(child))
       val childNode = child.doTransform(args)
@@ -257,19 +254,18 @@ case class CHSizeExpressionTransformer(
         Lists.newArrayList(new IntLiteralNode(-1)),
         sizeFuncNode)
     } else {
-      new UnaryExpressionTransformer(substraitExprName, child, original).doTransform(args)
+      GenericExpressionTransformer(substraitExprName, Seq(child), original).doTransform(args)
     }
   }
 }
 
-class CHTruncTimestampTransformer(
+case class CHTruncTimestampTransformer(
     substraitExprName: String,
     format: ExpressionTransformer,
     timestamp: ExpressionTransformer,
     timeZoneId: Option[String] = None,
     original: TruncTimestamp)
-  extends ExpressionTransformer
-  with Logging {
+  extends ExpressionTransformer {
 
   override def doTransform(args: java.lang.Object): ExpressionNode = {
     // The format must be constant string in the fucntion date_trunc of ch.
@@ -304,7 +300,7 @@ class CHTruncTimestampTransformer(
       timeZoneIgnore && timeZoneId.nonEmpty &&
       !timeZoneId.get.equalsIgnoreCase(
         SQLConf.get.getConfString(
-          s"${CHBackendSettings.getBackendConfigPrefix()}.runtime_config.timezone")
+          s"${CHBackendSettings.getBackendConfigPrefix}.runtime_config.timezone")
       )
     ) {
       throw new UnsupportedOperationException(
@@ -330,11 +326,210 @@ class CHTruncTimestampTransformer(
     val expressionNodes = new java.util.ArrayList[ExpressionNode]()
     expressionNodes.add(lowerFormatNode)
     expressionNodes.add(timestampNode)
-    if (timeZoneId != None) {
+    if (timeZoneId.isDefined) {
       expressionNodes.add(ExpressionBuilder.makeStringLiteral(timeZoneId.get))
     }
 
     val typeNode = ConverterUtils.getTypeNode(original.dataType, original.nullable)
     ExpressionBuilder.makeScalarFunction(functionId, expressionNodes, typeNode)
+  }
+}
+
+case class CHStringTranslateTransformer(
+    substraitExprName: String,
+    srcExpr: ExpressionTransformer,
+    matchingExpr: ExpressionTransformer,
+    replaceExpr: ExpressionTransformer,
+    original: StringTranslate)
+  extends ExpressionTransformer {
+
+  override def doTransform(args: java.lang.Object): ExpressionNode = {
+    // In CH, translateUTF8 requires matchingExpr and replaceExpr argument have the same length
+    val matchingNode = matchingExpr.doTransform(args)
+    val replaceNode = replaceExpr.doTransform(args)
+    if (
+      !matchingNode.isInstanceOf[StringLiteralNode] ||
+      !replaceNode.isInstanceOf[StringLiteralNode]
+    ) {
+      throw new UnsupportedOperationException(s"$original not supported yet.")
+    }
+
+    val matchingLiteral = matchingNode.asInstanceOf[StringLiteralNode].getValue
+    val replaceLiteral = replaceNode.asInstanceOf[StringLiteralNode].getValue
+    if (matchingLiteral.length() != replaceLiteral.length()) {
+      throw new UnsupportedOperationException(s"$original not supported yet.")
+    }
+
+    GenericExpressionTransformer(
+      substraitExprName,
+      Seq(srcExpr, matchingExpr, replaceExpr),
+      original)
+      .doTransform(args)
+  }
+}
+
+case class CHStringLocateTransformer(
+    substraitExprName: String,
+    substrExpr: ExpressionTransformer,
+    strExpr: ExpressionTransformer,
+    startExpr: ExpressionTransformer,
+    original: StringLocate)
+  extends ExpressionTransformer {
+
+  override def doTransform(args: java.lang.Object): ExpressionNode = {
+    val substrNode = substrExpr.doTransform(args)
+    val strNode = strExpr.doTransform(args)
+    val startNode = startExpr.doTransform(args)
+
+    // Special Case
+    // In Spark, return 0 when start_pos is null
+    // but when start_pos is not null, return null if either str or substr is null
+    // so we need convert it to if(isnull(start_pos), 0, position(substr, str, start_pos)
+    val functionMap = args.asInstanceOf[java.util.HashMap[String, java.lang.Long]]
+    val locateFuncName = ConverterUtils.makeFuncName(
+      substraitExprName,
+      original.children.map(_.dataType),
+      FunctionConfig.OPT)
+    val locateFuncId = ExpressionBuilder.newScalarFunction(functionMap, locateFuncName)
+    val exprNodes = Lists.newArrayList(substrNode, strNode, startNode)
+    val typeNode = ConverterUtils.getTypeNode(original.dataType, original.nullable)
+    val locateFuncNode = ExpressionBuilder.makeScalarFunction(locateFuncId, exprNodes, typeNode)
+
+    // isnull(start_pos)
+    val isnullFuncName =
+      ConverterUtils.makeFuncName(ExpressionNames.IS_NULL, Seq(IntegerType), FunctionConfig.OPT)
+    val isnullFuncId = ExpressionBuilder.newScalarFunction(functionMap, isnullFuncName)
+    val isnullNode = ExpressionBuilder.makeScalarFunction(
+      isnullFuncId,
+      Lists.newArrayList(startNode),
+      TypeBuilder.makeBoolean(false))
+
+    new IfThenNode(
+      Lists.newArrayList(isnullNode),
+      Lists.newArrayList(new IntLiteralNode(0)),
+      locateFuncNode)
+  }
+}
+
+case class CHMd5Transformer(substraitExprName: String, child: ExpressionTransformer, original: Md5)
+  extends ExpressionTransformer {
+
+  override def doTransform(args: java.lang.Object): ExpressionNode = {
+    // In Spark: md5(str)
+    // In CH: lower(hex(md5(str)))
+    // So we need to wrap md5(str) with lower and hex in substrait plan for clickhouse backend.
+    val functionMap = args.asInstanceOf[java.util.HashMap[String, java.lang.Long]]
+
+    val md5FuncId = ExpressionBuilder.newScalarFunction(
+      functionMap,
+      ConverterUtils.makeFuncName(
+        substraitExprName,
+        Seq(original.child.dataType),
+        FunctionConfig.OPT))
+    val md5ChildNode = child.doTransform(args)
+    val md5ExprNodes = Lists.newArrayList(md5ChildNode)
+    // In CH, the output type of md5 is FixedString(16)
+    val md5TypeNode = TypeBuilder.makeFixedChar(original.nullable, 16)
+    val md5FuncNode = ExpressionBuilder.makeScalarFunction(md5FuncId, md5ExprNodes, md5TypeNode)
+
+    // wrap in hex: hex(md5(str))
+    val hexFuncId = ExpressionBuilder.newScalarFunction(
+      functionMap,
+      ConverterUtils.makeFuncName("hex", Seq(CharType(16)), FunctionConfig.OPT))
+    val hexExprNodes: ArrayList[ExpressionNode] = Lists.newArrayList(md5FuncNode)
+    val hexTypeNode = TypeBuilder.makeString(original.nullable)
+    val hexFuncNode = ExpressionBuilder.makeScalarFunction(hexFuncId, hexExprNodes, hexTypeNode)
+
+    // wrap in lower: lower(hex(md5(str)))
+    val lowerFuncId = ExpressionBuilder.newScalarFunction(
+      functionMap,
+      ConverterUtils.makeFuncName("lower", Seq(StringType), FunctionConfig.OPT))
+    val lowerExprNodes: ArrayList[ExpressionNode] = Lists.newArrayList(hexFuncNode)
+    val lowerTypeNode = TypeBuilder.makeString(original.nullable)
+    ExpressionBuilder.makeScalarFunction(lowerFuncId, lowerExprNodes, lowerTypeNode)
+  }
+}
+
+case class CHPosExplodeTransformer(
+    substraitExprName: String,
+    child: ExpressionTransformer,
+    original: PosExplode,
+    attributeSeq: Seq[Attribute])
+  extends ExpressionTransformer {
+
+  override def doTransform(args: java.lang.Object): ExpressionNode = {
+    val childNode: ExpressionNode = child.doTransform(args)
+
+    // sequence(0, size(array_or_map)-1)
+    val startExpr = new Literal(0, IntegerType)
+    val stopExpr = new Subtract(Size(original.child, false), Literal(1, IntegerType))
+    val stepExpr = new Literal(1, IntegerType)
+    val sequenceExpr = new Sequence(startExpr, stopExpr, stepExpr)
+    val sequenceExprNode = ExpressionConverter
+      .replaceWithExpressionTransformer(sequenceExpr, attributeSeq)
+      .doTransform(args)
+
+    val funcMap = args.asInstanceOf[java.util.HashMap[String, java.lang.Long]]
+
+    // map_from_arrays_unaligned(sequence(0, size(array_or_map)-1), array_or_map)
+    val mapFromArraysUnalignedFuncId = ExpressionBuilder.newScalarFunction(
+      funcMap,
+      ConverterUtils.makeFuncName(
+        "map_from_arrays_unaligned",
+        Seq(sequenceExpr.dataType, original.child.dataType),
+        FunctionConfig.OPT))
+
+    // Notice that in CH mapFromArraysUnaligned accepts the second arguments as MapType or ArrayType
+    // But in Spark, it accepts ArrayType.
+    val keyType = IntegerType
+    val (valType, valContainsNull) = original.child.dataType match {
+      case a: ArrayType => (a.elementType, a.containsNull)
+      case m: MapType =>
+        (
+          StructType(
+            StructField("", m.keyType, false) ::
+              StructField("", m.valueType, m.valueContainsNull) :: Nil),
+          false)
+      case _ =>
+        throw new UnsupportedOperationException(
+          s"posexplode(${original.child.dataType}) not supported yet.")
+    }
+    val outputType = MapType(keyType, valType, valContainsNull)
+    val mapFromArraysUnalignedExprNode = ExpressionBuilder.makeScalarFunction(
+      mapFromArraysUnalignedFuncId,
+      Lists.newArrayList(sequenceExprNode, childNode),
+      ConverterUtils.getTypeNode(outputType, original.child.nullable))
+
+    // posexplode(map_from_arrays_unaligned(sequence(0, size(array_or_map)-1), array_or_map))
+    val funcId = ExpressionBuilder.newScalarFunction(
+      funcMap,
+      ConverterUtils.makeFuncName(ExpressionNames.POSEXPLODE, Seq(outputType), FunctionConfig.OPT))
+
+    val childType = original.child.dataType
+    childType match {
+      case a: ArrayType =>
+        // Output pos, col when input is array
+        val structType = StructType(
+          Array(
+            StructField("pos", IntegerType, false),
+            StructField("col", a.elementType, a.containsNull)))
+        ExpressionBuilder.makeScalarFunction(
+          funcId,
+          Lists.newArrayList(mapFromArraysUnalignedExprNode),
+          ConverterUtils.getTypeNode(structType, false))
+      case m: MapType =>
+        // Output pos, key, value when input is map
+        val structType = StructType(
+          Array(
+            StructField("pos", IntegerType, false),
+            StructField("key", m.keyType, false),
+            StructField("value", m.valueType, m.valueContainsNull)))
+        ExpressionBuilder.makeScalarFunction(
+          funcId,
+          Lists.newArrayList(mapFromArraysUnalignedExprNode),
+          ConverterUtils.getTypeNode(structType, false))
+      case _ =>
+        throw new UnsupportedOperationException(s"posexplode($childType) not supported yet.")
+    }
   }
 }

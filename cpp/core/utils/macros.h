@@ -19,9 +19,16 @@
 
 #include <time.h>
 
+#include <arrow/status.h>
+#include <glog/logging.h>
 #include <chrono>
 
 #include "utils/exception.h"
+
+#define GLUTEN_EXPAND(x) x
+#define GLUTEN_STRINGIFY(x) #x
+#define GLUTEN_TOSTRING(x) GLUTEN_STRINGIFY(x)
+#define GLUTEN_CONCAT(x, y) x##y
 
 #define TIME_NANO_DIFF(finish, start) (finish.tv_sec - start.tv_sec) * 1000000000 + (finish.tv_nsec - start.tv_nsec)
 
@@ -92,14 +99,6 @@
       std::cout << v[i];               \
   }                                    \
   std::cout << std::endl;
-
-#define THROW_NOT_OK(expr)                  \
-  do {                                      \
-    auto __s = (expr);                      \
-    if (!__s.ok()) {                        \
-      throw GlutenException(__s.message()); \
-    }                                       \
-  } while (false);
 
 #define TIME_TO_STRING(time) (time > 10000 ? time / 1000 : time) << (time > 10000 ? " ms" : " us")
 

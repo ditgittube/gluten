@@ -14,17 +14,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.utils
-
-import io.glutenproject.extension.GlutenPlan
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.execution._
-import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, AdaptiveSparkPlanHelper, ColumnarAQEShuffleReadExec, QueryStageExec}
+import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, AdaptiveSparkPlanHelper, QueryStageExec}
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
 
-/** attention: if AQE is enable,This method will only be executed correctly after the execution plan
+/**
+ * attention: if AQE is enable,This method will only be executed correctly after the execution plan
  * is fully determined
  */
 
@@ -57,32 +55,30 @@ object FallbackUtil extends Logging with AdaptiveSparkPlanHelper {
         true
       case _: ReusedExchangeExec =>
         true
-      case _: ColumnarAQEShuffleReadExec =>
+      case p: SparkPlan if p.supportsColumnar =>
         true
       case _ =>
         false
     }
   }
 
-  def isFallback(plan: SparkPlan): Boolean = {
+  def hasFallback(plan: SparkPlan): Boolean = {
     var fallbackOperator: Seq[SparkPlan] = null
     if (plan.isInstanceOf[AdaptiveSparkPlanExec]) {
       fallbackOperator = collectWithSubqueries(plan) {
-        case plan if !plan.isInstanceOf[GlutenPlan] && !skip(plan) =>
+        case plan if !PlanUtil.isGlutenColumnarOp(plan) && !skip(plan) =>
           plan
       }
     } else {
       fallbackOperator = plan.collectWithSubqueries {
-        case plan if !plan.isInstanceOf[GlutenPlan] && !skip(plan) =>
+        case plan if !PlanUtil.isGlutenColumnarOp(plan) && !skip(plan) =>
           plan
       }
     }
 
-    if (!fallbackOperator.isEmpty) {
-      fallbackOperator.foreach { operator =>
-        log.info(s"gluten fallback operator:{$operator}")
-      }
+    if (fallbackOperator.nonEmpty) {
+      fallbackOperator.foreach(operator => log.info(s"gluten fallback operator:{$operator}"))
     }
-    return fallbackOperator.nonEmpty
+    fallbackOperator.nonEmpty
   }
 }

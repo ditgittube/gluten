@@ -15,112 +15,207 @@
  * limitations under the License.
  */
 
+#include <chrono>
+#include <thread>
+
 #include <arrow/c/bridge.h>
 #include <arrow/util/range.h>
 #include <benchmark/benchmark.h>
 #include <gflags/gflags.h>
 #include <operators/writer/ArrowWriter.h>
-#include <velox/exec/PlanNodeStats.h>
-#include <velox/exec/Task.h>
 
-#include <chrono>
-
-#include "BatchStreamIterator.h"
-#include "BatchVectorIterator.h"
-#include "BenchmarkUtils.h"
-#include "compute/ArrowTypeUtils.h"
-#include "compute/VeloxBackend.h"
+#include "benchmarks/common/BenchmarkUtils.h"
+#include "benchmarks/common/FileReaderIterator.h"
 #include "compute/VeloxPlanConverter.h"
+#include "compute/VeloxRuntime.h"
 #include "config/GlutenConfig.h"
+#include "shuffle/LocalPartitionWriter.h"
+#include "shuffle/VeloxShuffleWriter.h"
+#include "utils/VeloxArrowUtils.h"
 #include "utils/exception.h"
-
-#include <thread>
+#include "velox/exec/PlanNodeStats.h"
 
 using namespace gluten;
 
+namespace {
 DEFINE_bool(skip_input, false, "Skip specifying input files.");
-DEFINE_bool(gen_orc_input, false, "Generate orc files from parquet as input files.");
+DEFINE_bool(with_shuffle, false, "Add shuffle split at end.");
+DEFINE_string(partitioning, "rr", "Short partitioning name. Valid options are rr, hash, range, single");
+DEFINE_bool(zstd, false, "Use ZSTD as shuffle compression codec");
+DEFINE_bool(qat_gzip, false, "Use QAT GZIP as shuffle compression codec");
+DEFINE_bool(qat_zstd, false, "Use QAT ZSTD as shuffle compression codec");
+DEFINE_bool(iaa_gzip, false, "Use IAA GZIP as shuffle compression codec");
+DEFINE_int32(shuffle_partitions, 200, "Number of shuffle split (reducer) partitions");
 
-static const std::string kParquetSuffix = ".parquet";
-static const std::string kOrcSuffix = ".orc";
+struct WriterMetrics {
+  int64_t splitTime;
+  int64_t evictTime;
+  int64_t writeTime;
+  int64_t compressTime;
+};
+
+std::shared_ptr<VeloxShuffleWriter> createShuffleWriter(
+    VeloxMemoryManager* memoryManager,
+    const std::string& dataFile,
+    const std::vector<std::string>& localDirs) {
+  PartitionWriterOptions partitionWriterOptions{};
+  if (FLAGS_zstd) {
+    partitionWriterOptions.codecBackend = CodecBackend::NONE;
+    partitionWriterOptions.compressionType = arrow::Compression::ZSTD;
+  } else if (FLAGS_qat_gzip) {
+    partitionWriterOptions.codecBackend = CodecBackend::QAT;
+    partitionWriterOptions.compressionType = arrow::Compression::GZIP;
+  } else if (FLAGS_qat_zstd) {
+    partitionWriterOptions.codecBackend = CodecBackend::QAT;
+    partitionWriterOptions.compressionType = arrow::Compression::ZSTD;
+  } else if (FLAGS_iaa_gzip) {
+    partitionWriterOptions.codecBackend = CodecBackend::IAA;
+    partitionWriterOptions.compressionType = arrow::Compression::GZIP;
+  }
+
+  std::unique_ptr<PartitionWriter> partitionWriter = std::make_unique<LocalPartitionWriter>(
+      FLAGS_shuffle_partitions,
+      std::move(partitionWriterOptions),
+      memoryManager->getArrowMemoryPool(),
+      dataFile,
+      localDirs);
+
+  auto options = ShuffleWriterOptions{};
+  options.partitioning = gluten::toPartitioning(FLAGS_partitioning);
+  GLUTEN_ASSIGN_OR_THROW(
+      auto shuffleWriter,
+      VeloxShuffleWriter::create(
+          FLAGS_shuffle_partitions,
+          std::move(partitionWriter),
+          std::move(options),
+          memoryManager->getLeafMemoryPool(),
+          memoryManager->getArrowMemoryPool()));
+
+  return shuffleWriter;
+}
+
+void populateWriterMetrics(
+    const std::shared_ptr<VeloxShuffleWriter>& shuffleWriter,
+    int64_t shuffleWriteTime,
+    WriterMetrics& metrics) {
+  metrics.compressTime += shuffleWriter->totalCompressTime();
+  metrics.evictTime += shuffleWriter->totalEvictTime();
+  metrics.writeTime += shuffleWriter->totalWriteTime();
+  metrics.evictTime +=
+      (shuffleWriteTime - shuffleWriter->totalCompressTime() - shuffleWriter->totalEvictTime() -
+       shuffleWriter->totalWriteTime());
+}
+
+} // namespace
 
 auto BM_Generic = [](::benchmark::State& state,
-                     const std::string& substraitJsonFile,
+                     const std::string& planFile,
+                     const std::string& splitFile,
                      const std::vector<std::string>& inputFiles,
                      const std::unordered_map<std::string, std::string>& conf,
-                     GetInputFunc* getInputIterator) {
+                     FileReaderType readerType) {
   // Pin each threads to different CPU# starting from 0 or --cpu.
   if (FLAGS_cpu != -1) {
     setCpu(FLAGS_cpu + state.thread_index());
   } else {
     setCpu(state.thread_index());
   }
-  const auto& filePath = getExampleFilePath(substraitJsonFile);
-  auto plan = getPlanFromFile(filePath);
+  bool emptySplit = splitFile.empty();
+  memory::MemoryManager::testingSetInstance({});
+  auto memoryManager = getDefaultMemoryManager();
+  auto runtime = Runtime::create(kVeloxRuntimeKind, conf);
+  auto plan = getPlanFromFile("Plan", planFile);
+  std::string split;
+  if (!emptySplit) {
+    split = getPlanFromFile("ReadRel.LocalFiles", splitFile);
+  }
   auto startTime = std::chrono::steady_clock::now();
   int64_t collectBatchTime = 0;
+  WriterMetrics writerMetrics{};
 
   for (auto _ : state) {
-    auto backend = gluten::createBackend();
     std::vector<std::shared_ptr<gluten::ResultIterator>> inputIters;
-    std::vector<BatchIterator*> inputItersRaw;
+    std::vector<FileReaderIterator*> inputItersRaw;
     if (!inputFiles.empty()) {
-      std::transform(inputFiles.cbegin(), inputFiles.cend(), std::back_inserter(inputIters), getInputIterator);
+      for (const auto& input : inputFiles) {
+        inputIters.push_back(getInputIteratorFromFileReader(input, readerType));
+      }
       std::transform(
           inputIters.begin(),
           inputIters.end(),
           std::back_inserter(inputItersRaw),
           [](std::shared_ptr<gluten::ResultIterator> iter) {
-            return static_cast<BatchIterator*>(iter->getInputIter());
+            return static_cast<FileReaderIterator*>(iter->getInputIter());
           });
     }
 
-    backend->parsePlan(reinterpret_cast<uint8_t*>(plan.data()), plan.size());
-    auto resultIter = backend->getResultIterator(
-        gluten::defaultMemoryAllocator().get(), "/tmp/test-spill", std::move(inputIters), conf);
-    auto veloxPlan = std::dynamic_pointer_cast<gluten::VeloxBackend>(backend)->getVeloxPlan();
-    ArrowSchema cSchema;
-    toArrowSchema(veloxPlan->outputType(), &cSchema);
-    GLUTEN_ASSIGN_OR_THROW(auto outputSchema, arrow::ImportSchema(&cSchema));
-    ArrowWriter writer{FLAGS_write_file};
-    state.PauseTiming();
-    if (!FLAGS_write_file.empty()) {
-      GLUTEN_THROW_NOT_OK(writer.initWriter(*(outputSchema.get())));
+    runtime->parsePlan(reinterpret_cast<uint8_t*>(plan.data()), plan.size(), {});
+    if (!emptySplit) {
+      runtime->parseSplitInfo(reinterpret_cast<uint8_t*>(split.data()), split.size());
     }
-    state.ResumeTiming();
-    while (resultIter->hasNext()) {
-      auto array = resultIter->next()->exportArrowArray();
+    auto resultIter =
+        runtime->createResultIterator(memoryManager.get(), "/tmp/test-spill", std::move(inputIters), conf);
+    auto veloxPlan = dynamic_cast<gluten::VeloxRuntime*>(runtime)->getVeloxPlan();
+    if (FLAGS_with_shuffle) {
+      int64_t shuffleWriteTime;
+      TIME_NANO_START(shuffleWriteTime);
+      std::string dataFile;
+      std::vector<std::string> localDirs;
+      bool isFromEnv;
+      GLUTEN_THROW_NOT_OK(setLocalDirsAndDataFileFromEnv(dataFile, localDirs, isFromEnv));
+      const auto& shuffleWriter = createShuffleWriter(memoryManager.get(), dataFile, localDirs);
+      while (resultIter->hasNext()) {
+        GLUTEN_THROW_NOT_OK(shuffleWriter->split(resultIter->next(), ShuffleWriter::kMinMemLimit));
+      }
+      GLUTEN_THROW_NOT_OK(shuffleWriter->stop());
+      TIME_NANO_END(shuffleWriteTime);
+      populateWriterMetrics(shuffleWriter, shuffleWriteTime, writerMetrics);
+      // Cleanup shuffle outputs
+      cleanupShuffleOutput(dataFile, localDirs, isFromEnv);
+    } else {
+      // May write the output into file.
+      ArrowSchema cSchema;
+      toArrowSchema(veloxPlan->outputType(), memoryManager->getLeafMemoryPool().get(), &cSchema);
+      GLUTEN_ASSIGN_OR_THROW(auto outputSchema, arrow::ImportSchema(&cSchema));
+      ArrowWriter writer{FLAGS_write_file};
       state.PauseTiming();
-      auto maybeBatch = arrow::ImportRecordBatch(array.get(), outputSchema);
-      if (!maybeBatch.ok()) {
-        state.SkipWithError(maybeBatch.status().message().c_str());
-        return;
-      }
-      if (FLAGS_print_result) {
-        std::cout << maybeBatch.ValueOrDie()->ToString() << std::endl;
-      }
       if (!FLAGS_write_file.empty()) {
-        GLUTEN_THROW_NOT_OK(writer.writeInBatches(maybeBatch.ValueOrDie()));
+        GLUTEN_THROW_NOT_OK(writer.initWriter(*(outputSchema.get())));
+      }
+      state.ResumeTiming();
+
+      while (resultIter->hasNext()) {
+        auto array = resultIter->next()->exportArrowArray();
+        state.PauseTiming();
+        auto maybeBatch = arrow::ImportRecordBatch(array.get(), outputSchema);
+        if (!maybeBatch.ok()) {
+          state.SkipWithError(maybeBatch.status().message().c_str());
+          return;
+        }
+        if (FLAGS_print_result) {
+          LOG(INFO) << maybeBatch.ValueOrDie()->ToString();
+        }
+      }
+
+      state.PauseTiming();
+      if (!FLAGS_write_file.empty()) {
+        GLUTEN_THROW_NOT_OK(writer.closeWriter());
       }
       state.ResumeTiming();
     }
-    state.PauseTiming();
-    if (!FLAGS_write_file.empty()) {
-      GLUTEN_THROW_NOT_OK(writer.closeWriter());
-    }
-    state.ResumeTiming();
 
     collectBatchTime +=
-        std::accumulate(inputItersRaw.begin(), inputItersRaw.end(), 0, [](int64_t sum, BatchIterator* iter) {
+        std::accumulate(inputItersRaw.begin(), inputItersRaw.end(), 0, [](int64_t sum, FileReaderIterator* iter) {
           return sum + iter->getCollectBatchTime();
         });
 
     auto* rawIter = static_cast<gluten::WholeStageResultIterator*>(resultIter->getInputIter());
-    const auto& task = rawIter->task_;
-    const auto& planNode = rawIter->veloxPlan_;
+    const auto* task = rawIter->task();
+    const auto* planNode = rawIter->veloxPlan();
     auto statsStr = facebook::velox::exec::printPlanWithStats(*planNode, task->taskStats(), true);
-    std::cout << statsStr << std::endl;
+    LOG(INFO) << statsStr;
   }
+  Runtime::release(runtime);
 
   auto endTime = std::chrono::steady_clock::now();
   auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime).count();
@@ -129,80 +224,14 @@ auto BM_Generic = [](::benchmark::State& state,
       benchmark::Counter(collectBatchTime, benchmark::Counter::kAvgIterations, benchmark::Counter::OneK::kIs1000);
   state.counters["elapsed_time"] =
       benchmark::Counter(duration, benchmark::Counter::kAvgIterations, benchmark::Counter::OneK::kIs1000);
-};
-
-class OrcFileGuard {
- public:
-  explicit OrcFileGuard(const std::vector<std::string>& inputFiles) {
-    orcFiles_.resize(inputFiles.size());
-    for (auto i = 0; i != inputFiles.size(); ++i) {
-      GLUTEN_ASSIGN_OR_THROW(orcFiles_[i], createOrcFile(inputFiles[i]));
-    }
-  }
-
-  ~OrcFileGuard() {
-    for (auto& x : orcFiles_) {
-      std::filesystem::remove(x);
-    }
-  }
-
-  const std::vector<std::string>& getOrcFiles() {
-    return orcFiles_;
-  }
-
- private:
-  arrow::Result<std::string> createOrcFile(const std::string& inputFile) {
-    ParquetBatchStreamIterator parquetIterator(inputFile);
-
-    std::string outputFile = inputFile;
-    // Get the filename.
-    auto pos = inputFile.find_last_of("/");
-    if (pos != std::string::npos) {
-      outputFile = inputFile.substr(pos + 1);
-    }
-    // If any suffix is found, replace it with ".orc"
-    pos = outputFile.find_first_of(".");
-    if (pos != std::string::npos) {
-      outputFile = outputFile.substr(0, pos) + kOrcSuffix;
-    } else {
-      return arrow::Status::Invalid("Invalid input file: " + inputFile);
-    }
-    outputFile = std::filesystem::current_path().string() + "/" + outputFile;
-
-    std::shared_ptr<arrow::io::FileOutputStream> outputStream;
-    ARROW_ASSIGN_OR_RAISE(outputStream, arrow::io::FileOutputStream::Open(outputFile));
-
-    auto writerOptions = arrow::adapters::orc::WriteOptions();
-    auto maybeWriter = arrow::adapters::orc::ORCFileWriter::Open(outputStream.get(), writerOptions);
-    GLUTEN_THROW_NOT_OK(maybeWriter);
-    auto& writer = *maybeWriter;
-
-    while (true) {
-      // 1. read from Parquet
-      auto cb = parquetIterator.next();
-      if (cb == nullptr) {
-        break;
-      }
-
-      auto arrowColumnarBatch = std::dynamic_pointer_cast<gluten::ArrowColumnarBatch>(cb);
-      auto recordBatch = arrowColumnarBatch->getRecordBatch();
-
-      // 2. write to Orc
-      if (!(writer->Write(*recordBatch)).ok()) {
-        return arrow::Status::IOError("Write failed");
-      }
-    }
-
-    if (!(writer->Close()).ok()) {
-      return arrow::Status::IOError("Close failed");
-    }
-
-    std::cout << "Created orc file: " << outputFile << std::endl;
-
-    return outputFile;
-  }
-
-  std::vector<std::string> orcFiles_;
+  state.counters["shuffle_write_time"] = benchmark::Counter(
+      writerMetrics.writeTime, benchmark::Counter::kAvgIterations, benchmark::Counter::OneK::kIs1000);
+  state.counters["shuffle_spill_time"] = benchmark::Counter(
+      writerMetrics.evictTime, benchmark::Counter::kAvgIterations, benchmark::Counter::OneK::kIs1000);
+  state.counters["shuffle_split_time"] = benchmark::Counter(
+      writerMetrics.splitTime, benchmark::Counter::kAvgIterations, benchmark::Counter::OneK::kIs1000);
+  state.counters["shuffle_compress_time"] = benchmark::Counter(
+      writerMetrics.compressTime, benchmark::Counter::kAvgIterations, benchmark::Counter::OneK::kIs1000);
 };
 
 int main(int argc, char** argv) {
@@ -210,74 +239,71 @@ int main(int argc, char** argv) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
 
   std::string substraitJsonFile;
+  std::string splitFile;
   std::vector<std::string> inputFiles;
   std::unordered_map<std::string, std::string> conf;
-  std::shared_ptr<OrcFileGuard> orcFileGuard;
 
-  conf.insert({gluten::kSparkBatchSize, FLAGS_batch_size});
+  conf.insert({gluten::kSparkBatchSize, std::to_string(FLAGS_batch_size)});
+  conf.insert({kDebugModeEnabled, "true"});
   initVeloxBackend(conf);
 
   try {
     if (argc < 2) {
-      std::cout << "No input args. Usage: " << std::endl
-                << "./generic_benchmark /path/to/substrait_json_file /path/to/data_file_1 /path/to/data_file_2 ..."
-                << std::endl;
-      std::cout << "Running example..." << std::endl;
+      LOG(INFO)
+          << "No input args. Usage: " << std::endl
+          << "./generic_benchmark /absolute-path/to/substrait_json_file /absolute-path/to/split_json_file(optional)"
+          << " /absolute-path/to/data_file_1 /absolute-path/to/data_file_2 ...";
+      LOG(INFO) << "Running example...";
       inputFiles.resize(2);
       substraitJsonFile = getGeneratedFilePath("example.json");
       inputFiles[0] = getGeneratedFilePath("example_orders");
       inputFiles[1] = getGeneratedFilePath("example_lineitem");
     } else {
       substraitJsonFile = argv[1];
+      splitFile = argv[2];
       abortIfFileNotExists(substraitJsonFile);
-      std::cout << "Using substrait json file: " << std::endl << substraitJsonFile << std::endl;
-      std::cout << "Using " << argc - 2 << " input data file(s): " << std::endl;
-      for (auto i = 2; i < argc; ++i) {
+      LOG(INFO) << "Using substrait json file: " << std::endl << substraitJsonFile;
+      LOG(INFO) << "Using " << argc - 2 << " input data file(s): ";
+      for (auto i = 3; i < argc; ++i) {
         inputFiles.emplace_back(argv[i]);
         abortIfFileNotExists(inputFiles.back());
-        std::cout << inputFiles.back() << std::endl;
+        LOG(INFO) << inputFiles.back();
       }
     }
   } catch (const std::exception& e) {
-    std::cout << "Failed to run benchmark: " << e.what() << std::endl;
+    LOG(INFO) << "Failed to run benchmark: " << e.what();
     ::benchmark::Shutdown();
     std::exit(EXIT_FAILURE);
   }
 
-#define GENERIC_BENCHMARK(NAME, FUNC)                                                                      \
-  do {                                                                                                     \
-    auto* bm = ::benchmark::RegisterBenchmark(NAME, BM_Generic, substraitJsonFile, inputFiles, conf, FUNC) \
-                   ->MeasureProcessCPUTime()                                                               \
-                   ->UseRealTime();                                                                        \
-    if (FLAGS_threads > 0) {                                                                               \
-      bm->Threads(FLAGS_threads);                                                                          \
-    } else {                                                                                               \
-      bm->ThreadRange(1, std::thread::hardware_concurrency());                                             \
-    }                                                                                                      \
-    if (FLAGS_iterations > 0) {                                                                            \
-      bm->Iterations(FLAGS_iterations);                                                                    \
-    }                                                                                                      \
+#define GENERIC_BENCHMARK(NAME, READER_TYPE)                                                                          \
+  do {                                                                                                                \
+    auto* bm =                                                                                                        \
+        ::benchmark::RegisterBenchmark(NAME, BM_Generic, substraitJsonFile, splitFile, inputFiles, conf, READER_TYPE) \
+            ->MeasureProcessCPUTime()                                                                                 \
+            ->UseRealTime();                                                                                          \
+    if (FLAGS_threads > 0) {                                                                                          \
+      bm->Threads(FLAGS_threads);                                                                                     \
+    } else {                                                                                                          \
+      bm->ThreadRange(1, std::thread::hardware_concurrency());                                                        \
+    }                                                                                                                 \
+    if (FLAGS_iterations > 0) {                                                                                       \
+      bm->Iterations(FLAGS_iterations);                                                                               \
+    }                                                                                                                 \
   } while (0)
 
-#if 0
-  std::cout << "FLAGS_threads:" << FLAGS_threads << std::endl;
-  std::cout << "FLAGS_iterations:" << FLAGS_iterations << std::endl;
-  std::cout << "FLAGS_cpu:" << FLAGS_cpu << std::endl;
-  std::cout << "FLAGS_print_result:" << FLAGS_print_result << std::endl;
-  std::cout << "FLAGS_write_file:" << FLAGS_write_file << std::endl;
-  std::cout << "FLAGS_batch_size:" << FLAGS_batch_size << std::endl;
-#endif
+  DLOG(INFO) << "FLAGS_threads:" << FLAGS_threads;
+  DLOG(INFO) << "FLAGS_iterations:" << FLAGS_iterations;
+  DLOG(INFO) << "FLAGS_cpu:" << FLAGS_cpu;
+  DLOG(INFO) << "FLAGS_print_result:" << FLAGS_print_result;
+  DLOG(INFO) << "FLAGS_write_file:" << FLAGS_write_file;
+  DLOG(INFO) << "FLAGS_batch_size:" << FLAGS_batch_size;
 
   if (FLAGS_skip_input) {
-    GENERIC_BENCHMARK("SkipInput", nullptr);
-  } else if (FLAGS_gen_orc_input) {
-    orcFileGuard = std::make_shared<OrcFileGuard>(inputFiles);
-    inputFiles = orcFileGuard->getOrcFiles();
-    GENERIC_BENCHMARK("OrcInputFromBatchVector", getOrcInputFromBatchVector);
-    GENERIC_BENCHMARK("OrcInputFromBatchStream", getOrcInputFromBatchStream);
+    GENERIC_BENCHMARK("SkipInput", FileReaderType::kNone);
   } else {
-    GENERIC_BENCHMARK("ParquetInputFromBatchVector", getParquetInputFromBatchVector);
-    GENERIC_BENCHMARK("ParquetInputFromBatchStream", getParquetInputFromBatchStream);
+    GENERIC_BENCHMARK("InputFromBatchVector", FileReaderType::kBuffered);
+    GENERIC_BENCHMARK("InputFromBatchStream", FileReaderType::kStream);
   }
 
   ::benchmark::RunSpecifiedBenchmarks();

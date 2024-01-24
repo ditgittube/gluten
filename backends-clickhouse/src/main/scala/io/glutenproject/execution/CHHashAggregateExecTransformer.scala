@@ -16,23 +16,27 @@
  */
 package io.glutenproject.execution
 
+import io.glutenproject.backendsapi.BackendsApiManager
 import io.glutenproject.execution.CHHashAggregateExecTransformer.getAggregateResultAttributes
 import io.glutenproject.expression._
 import io.glutenproject.substrait.`type`.{TypeBuilder, TypeNode}
 import io.glutenproject.substrait.{AggregationParams, SubstraitContext}
 import io.glutenproject.substrait.expression.{AggregateFunctionNode, ExpressionBuilder, ExpressionNode}
-import io.glutenproject.substrait.extensions.ExtensionBuilder
-import io.glutenproject.substrait.rel.{LocalFilesBuilder, RelBuilder, RelNode}
+import io.glutenproject.substrait.extensions.{AdvancedExtensionNode, ExtensionBuilder}
+import io.glutenproject.substrait.rel.{RelBuilder, RelNode}
 
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate._
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.aggregate.BaseAggregateExec
-import org.apache.spark.sql.types.{DataType, StructField, StructType}
+import org.apache.spark.sql.types._
 
-import com.google.protobuf.Any
+import com.google.protobuf.{Any, StringValue}
 
 import java.util
+
+import scala.collection.JavaConverters._
+import scala.collection.mutable.ListBuffer
 
 object CHHashAggregateExecTransformer {
   def getAggregateResultAttributes(
@@ -69,21 +73,29 @@ case class CHHashAggregateExecTransformer(
 
   protected val modes: Seq[AggregateMode] = aggregateExpressions.map(_.mode).distinct
 
-  override def doTransform(context: SubstraitContext): TransformContext = {
-    val childCtx = child match {
-      case c: TransformSupport =>
-        c.doTransform(context)
-      case _ =>
-        null
+  override protected def checkType(dataType: DataType): Boolean = {
+    dataType match {
+      case BooleanType | ByteType | ShortType | IntegerType | LongType | FloatType | DoubleType |
+          StringType | TimestampType | DateType | BinaryType =>
+        true
+      case _: StructType => true
+      case d: DecimalType => true
+      case a: ArrayType => true
+      case n: NullType => true
+      case other => false
     }
+  }
 
-    val aggParams = new AggregationParams
+  override def doTransform(context: SubstraitContext): TransformContext = {
+    val childCtx = child.asInstanceOf[TransformSupport].doTransform(context)
     val operatorId = context.nextOperatorId(this.nodeName)
 
-    val (relNode, inputAttributes, outputAttributes) = if (childCtx != null) {
+    val aggParams = new AggregationParams
+    val isChildTransformSupported = !child.isInstanceOf[InputIteratorTransformer]
+    val (relNode, inputAttributes, outputAttributes) = if (isChildTransformSupported) {
       // The final HashAggregateExecTransformer and partial HashAggregateExecTransformer
       // are in the one WholeStageTransformer.
-      if (!modes.contains(Partial)) {
+      if (modes.isEmpty || !modes.contains(Partial)) {
         (
           getAggRel(context, operatorId, aggParams, childCtx.root),
           childCtx.outputAttributes,
@@ -100,11 +112,20 @@ case class CHHashAggregateExecTransformer(
       // Notes: Currently, ClickHouse backend uses the output attributes of
       // aggregateResultAttributes as Shuffle output,
       // which is different from Velox backend.
-      aggParams.isReadRel = true
       val typeList = new util.ArrayList[TypeNode]()
       val nameList = new util.ArrayList[String]()
-      val (inputAttrs, outputAttrs) =
-        if (!modes.contains(Partial)) {
+      val (inputAttrs, outputAttrs) = {
+        if (modes.isEmpty) {
+          // When there is no aggregate function, it does not need
+          // to handle outputs according to the AggregateMode
+          for (attr <- child.output) {
+            typeList.add(ConverterUtils.getTypeNode(attr.dataType, attr.nullable))
+            nameList.add(ConverterUtils.genColumnNameWithExprId(attr))
+            nameList.addAll(ConverterUtils.collectStructFieldNames(attr.dataType))
+          }
+          (child.output, output)
+        } else if (!modes.contains(Partial)) {
+          // non-partial mode
           var resultAttrIndex = 0
           for (attr <- aggregateResultAttributes) {
             val colName = getIntermediateAggregateResultColumnName(
@@ -121,22 +142,21 @@ case class CHHashAggregateExecTransformer(
           }
           (aggregateResultAttributes, output)
         } else {
+          // partial mode
           for (attr <- child.output) {
             typeList.add(ConverterUtils.getTypeNode(attr.dataType, attr.nullable))
             nameList.add(ConverterUtils.genColumnNameWithExprId(attr))
+            nameList.addAll(ConverterUtils.collectStructFieldNames(attr.dataType))
           }
 
           (child.output, aggregateResultAttributes)
         }
+      }
 
-      // The iterator index will be added in the path of LocalFiles.
-      val iteratorIndex: Long = context.nextIteratorIndex
-      val inputIter = LocalFilesBuilder.makeLocalFiles(
-        ConverterUtils.ITERATOR_PREFIX.concat(iteratorIndex.toString))
-      context.setIteratorNode(iteratorIndex, inputIter)
+      // The output is different with child.output, so we can not use `childCtx.root` as the
+      // `ReadRel`. Here we re-generate the `ReadRel` with the special output list.
       val readRel =
-        RelBuilder.makeReadRel(typeList, nameList, null, iteratorIndex, context, operatorId)
-
+        RelBuilder.makeReadRelForInputIteratorWithoutRegister(typeList, nameList, context)
       (getAggRel(context, operatorId, aggParams, readRel), inputAttrs, outputAttrs)
     }
     TransformContext(inputAttributes, outputAttributes, relNode)
@@ -259,31 +279,16 @@ case class CHHashAggregateExecTransformer(
         )
         aggregateFunctionList.add(aggFunctionNode)
       })
-    if (!validation) {
-      RelBuilder.makeAggregateRel(
-        input,
-        groupingList,
-        aggregateFunctionList,
-        aggFilterList,
-        context,
-        operatorId)
-    } else {
-      // Use a extension node to send the input types through Substrait plan for validation.
-      val inputTypeNodeList = new java.util.ArrayList[TypeNode]()
-      for (attr <- originalInputAttributes) {
-        inputTypeNodeList.add(ConverterUtils.getTypeNode(attr.dataType, attr.nullable))
-      }
-      val extensionNode = ExtensionBuilder.makeAdvancedExtension(
-        Any.pack(TypeBuilder.makeStruct(false, inputTypeNodeList).toProtobuf))
-      RelBuilder.makeAggregateRel(
-        input,
-        groupingList,
-        aggregateFunctionList,
-        aggFilterList,
-        extensionNode,
-        context,
-        operatorId)
-    }
+
+    val extensionNode = getAdvancedExtension(validation, originalInputAttributes)
+    RelBuilder.makeAggregateRel(
+      input,
+      groupingList,
+      aggregateFunctionList,
+      aggFilterList,
+      extensionNode,
+      context,
+      operatorId)
   }
 
   override def isStreaming: Boolean = false
@@ -301,8 +306,19 @@ case class CHHashAggregateExecTransformer(
       ConverterUtils.genColumnNameWithExprId(resultAttr)
     } else {
       val aggExpr = aggExpressions(columnIndex - groupingExprs.length)
+      val aggregateFunc = aggExpr.aggregateFunction
       var aggFunctionName =
-        AggregateFunctionsBuilder.getSubstraitFunctionName(aggExpr.aggregateFunction).get
+        if (
+          ExpressionMappings.expressionExtensionTransformer.extensionExpressionsMapping.contains(
+            aggregateFunc.getClass)
+        ) {
+          ExpressionMappings.expressionExtensionTransformer
+            .buildCustomAggregateFunction(aggregateFunc)
+            ._1
+            .get
+        } else {
+          AggregateFunctionsBuilder.getSubstraitFunctionName(aggregateFunc).get
+        }
       ConverterUtils.genColumnNameWithExprId(resultAttr) + "#Partial#" + aggFunctionName
     }
   }
@@ -337,6 +353,7 @@ case class CHHashAggregateExecTransformer(
     //   1. the intermediate result column will has a special format name,
     //     see genPartialAggregateResultColumnName
     //   2. Use a struct type to wrap the arguments' types of the aggregate function.
+    //      the arguments' types will be useful later in TypeParser::buildBlockFromNamedStruct
     val (dataType, nullable) = if (aggregateExpression.isEmpty) {
       (attr.dataType, attr.nullable)
     } else {
@@ -344,6 +361,9 @@ case class CHHashAggregateExecTransformer(
         case aggExpr: AggregateExpression =>
           aggExpr.aggregateFunction match {
             case avg: Average =>
+              // why using attr.nullable instead of child.nullable?
+              // because some aggregate operator's input's nullability is force changed
+              // in AggregateFunctionParser::parseFunctionArguments
               (makeStructTypeSingleOne(avg.child.dataType, attr.nullable), attr.nullable)
             case collect @ (_: CollectList | _: CollectSet) =>
               // Be careful with the nullable. We must keep the nullable the same as the column
@@ -360,10 +380,12 @@ case class CHHashAggregateExecTransformer(
               fields = fields :+ (corr.left.dataType, corr.left.nullable)
               fields = fields :+ (corr.right.dataType, corr.right.nullable)
               (makeStructType(fields), attr.nullable)
-            case expr =>
+            case expr if "bloom_filter_agg".equals(expr.prettyName) =>
+              (makeStructTypeSingleOne(expr.children.head.dataType, attr.nullable), attr.nullable)
+            case _ =>
               (makeStructTypeSingleOne(attr.dataType, attr.nullable), attr.nullable)
           }
-        case expr =>
+        case _ =>
           (attr.dataType, attr.nullable)
       }
     }
@@ -373,5 +395,79 @@ case class CHHashAggregateExecTransformer(
   override protected def withNewChildInternal(
       newChild: SparkPlan): CHHashAggregateExecTransformer = {
     copy(child = newChild)
+  }
+
+  override protected def getAdvancedExtension(
+      validation: Boolean = false,
+      originalInputAttributes: Seq[Attribute] = Seq.empty): AdvancedExtensionNode = {
+    val enhancement = if (validation) {
+      // Use a extension node to send the input types through Substrait plan for validation.
+      val inputTypeNodeList = originalInputAttributes
+        .map(attr => ConverterUtils.getTypeNode(attr.dataType, attr.nullable))
+        .asJava
+      Any.pack(TypeBuilder.makeStruct(false, inputTypeNodeList).toProtobuf)
+    } else {
+      null
+    }
+    val optimizationContent = s"has_required_child_distribution_expressions=" +
+      s"${requiredChildDistributionExpressions.isDefined}\n"
+    val optimization =
+      BackendsApiManager.getTransformerApiInstance.packPBMessage(
+        StringValue.newBuilder.setValue(optimizationContent).build)
+    ExtensionBuilder.makeAdvancedExtension(optimization, enhancement)
+
+  }
+
+  override protected def getAttrForAggregateExprs(
+      aggregateExpressions: Seq[AggregateExpression],
+      aggregateAttributeList: Seq[Attribute]): List[Attribute] = {
+    val aggregateAttr = new ListBuffer[Attribute]()
+    val size = aggregateExpressions.size
+    var resIndex = 0
+    for (expIdx <- 0 until size) {
+      val exp: AggregateExpression = aggregateExpressions(expIdx)
+      resIndex = getAttrForAggregateExpr(exp, aggregateAttributeList, aggregateAttr, resIndex)
+    }
+    aggregateAttr.toList
+  }
+
+  protected def getAttrForAggregateExpr(
+      exp: AggregateExpression,
+      aggregateAttributeList: Seq[Attribute],
+      aggregateAttr: ListBuffer[Attribute],
+      index: Int): Int = {
+    var resIndex = index
+    val aggregateFunc = exp.aggregateFunction
+    // First handle the custom aggregate functions
+    if (
+      ExpressionMappings.expressionExtensionTransformer.extensionExpressionsMapping.contains(
+        aggregateFunc.getClass)
+    ) {
+      ExpressionMappings.expressionExtensionTransformer
+        .getAttrsIndexForExtensionAggregateExpr(
+          aggregateFunc,
+          exp.mode,
+          exp,
+          aggregateAttributeList,
+          aggregateAttr,
+          index)
+    } else {
+      exp.mode match {
+        case Partial | PartialMerge =>
+          val aggBufferAttr = aggregateFunc.inputAggBufferAttributes
+          for (index <- aggBufferAttr.indices) {
+            val attr = ConverterUtils.getAttrFromExpr(aggBufferAttr(index))
+            aggregateAttr += attr
+          }
+          resIndex += aggBufferAttr.size
+          resIndex
+        case Final =>
+          aggregateAttr += aggregateAttributeList(resIndex)
+          resIndex += 1
+          resIndex
+        case other =>
+          throw new UnsupportedOperationException(s"Unsupported aggregate mode: $other.")
+      }
+    }
   }
 }

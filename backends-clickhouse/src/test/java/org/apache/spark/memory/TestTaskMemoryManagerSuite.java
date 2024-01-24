@@ -14,15 +14,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.spark.memory;
 
-import io.glutenproject.memory.GlutenMemoryConsumer;
-import io.glutenproject.memory.Spiller;
-import io.glutenproject.memory.TaskMemoryMetrics;
+import io.glutenproject.memory.SimpleMemoryUsageRecorder;
 import io.glutenproject.memory.alloc.CHManagedCHReservationListener;
 import io.glutenproject.memory.alloc.CHNativeMemoryAllocator;
 import io.glutenproject.memory.alloc.CHNativeMemoryAllocatorManagerImpl;
+import io.glutenproject.memory.memtarget.MemoryTargets;
 
 import org.apache.spark.SparkConf;
 import org.apache.spark.internal.config.package$;
@@ -30,6 +28,8 @@ import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+
+import java.util.Collections;
 
 public class TestTaskMemoryManagerSuite {
   static {
@@ -51,7 +51,9 @@ public class TestTaskMemoryManagerSuite {
 
     listener =
         new CHManagedCHReservationListener(
-            new GlutenMemoryConsumer(taskMemoryManager, Spiller.NO_OP), new TaskMemoryMetrics());
+            MemoryTargets.newConsumer(
+                taskMemoryManager, "test", Collections.emptyList(), Collections.emptyMap()),
+            new SimpleMemoryUsageRecorder());
 
     manager = new CHNativeMemoryAllocatorManagerImpl(new CHNativeMemoryAllocator(-1L, listener));
   }

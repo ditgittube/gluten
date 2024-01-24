@@ -1,3 +1,19 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #include "LeadLagParser.h"
 #include <Columns/ColumnNullable.h>
 #include <DataTypes/DataTypeNullable.h>
@@ -48,7 +64,7 @@ LeadParser::parseFunctionArguments(const CommonFunctionInfo & func_info, const S
     }    
     return args;
 }
-FunctionParserRegister<LeadParser> lead_register;
+AggregateFunctionParserRegister<LeadParser> lead_register;
 
 DB::ActionsDAG::NodeRawConstPtrs
 LagParser::parseFunctionArguments(const CommonFunctionInfo & func_info, const String & /*ch_func_name*/, DB::ActionsDAGPtr & actions_dag) const
@@ -80,8 +96,8 @@ LagParser::parseFunctionArguments(const CommonFunctionInfo & func_info, const St
 
     // lag's offset is negative
     auto literal_result = parseLiteral(arg1.literal());
-    assert(literal_result.second.safeGet<DB::Int32>() < 0);
-    auto real_field = 0 - literal_result.second.safeGet<DB::Int32>();
+    assert(literal_result.second.safeGet<Int32>() < 0);
+    auto real_field = 0 - literal_result.second.safeGet<Int32>();
     node = &actions_dag->addColumn(ColumnWithTypeAndName(
         literal_result.first->createColumnConst(1, real_field), literal_result.first, getUniqueName(toString(real_field))));
     node = ActionsDAGUtil::convertNodeType(actions_dag, node, DB::DataTypeInt64().getName());
@@ -96,5 +112,5 @@ LagParser::parseFunctionArguments(const CommonFunctionInfo & func_info, const St
     }
     return args;
 }
-FunctionParserRegister<LagParser> lag_register;
+AggregateFunctionParserRegister<LagParser> lag_register;
 }

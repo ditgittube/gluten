@@ -14,43 +14,64 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.substrait.rel;
 
-import com.google.protobuf.Any;
+import io.glutenproject.backendsapi.BackendsApiManager;
+
 import com.google.protobuf.StringValue;
 import io.substrait.proto.ReadRel;
 
-import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.List;
 
-public class ExtensionTableNode implements Serializable {
+public class ExtensionTableNode implements SplitInfo {
   private static final String MERGE_TREE = "MergeTree;";
   private Long minPartsNum;
   private Long maxPartsNum;
-  private String database = null;
-  private String tableName = null;
-  private String relativePath = null;
+  private String database;
+  private String tableName;
+  private String relativePath;
   private StringBuffer extensionTableStr = new StringBuffer(MERGE_TREE);
+  private final List<String> preferredLocations = new ArrayList<>();
 
-  ExtensionTableNode(Long minPartsNum, Long maxPartsNum, String database, String tableName,
-                     String relativePath) {
+  ExtensionTableNode(
+      Long minPartsNum,
+      Long maxPartsNum,
+      String database,
+      String tableName,
+      String relativePath,
+      List<String> preferredLocations) {
     this.minPartsNum = minPartsNum;
     this.maxPartsNum = maxPartsNum;
     this.database = database;
     this.tableName = tableName;
     this.relativePath = relativePath;
+    this.preferredLocations.addAll(preferredLocations);
     // MergeTree;{database}\n{table}\n{relative_path}\n{min_part}\n{max_part}\n
-    extensionTableStr.append(database).append("\n").append(tableName).append("\n")
-        .append(relativePath).append("\n")
-        .append(this.minPartsNum).append("\n")
-        .append(this.maxPartsNum).append("\n");
+    extensionTableStr
+        .append(database)
+        .append("\n")
+        .append(tableName)
+        .append("\n")
+        .append(relativePath)
+        .append("\n")
+        .append(this.minPartsNum)
+        .append("\n")
+        .append(this.maxPartsNum)
+        .append("\n");
+  }
+
+  @Override
+  public List<String> preferredLocations() {
+    return this.preferredLocations;
   }
 
   public ReadRel.ExtensionTable toProtobuf() {
     ReadRel.ExtensionTable.Builder extensionTableBuilder = ReadRel.ExtensionTable.newBuilder();
-    StringValue extensionTable =  StringValue.newBuilder()
-            .setValue(extensionTableStr.toString()).build();
-    extensionTableBuilder.setDetail(Any.pack(extensionTable));
+    StringValue extensionTable =
+        StringValue.newBuilder().setValue(extensionTableStr.toString()).build();
+    extensionTableBuilder.setDetail(
+        BackendsApiManager.getTransformerApiInstance().packPBMessage(extensionTable));
     return extensionTableBuilder.build();
   }
 }

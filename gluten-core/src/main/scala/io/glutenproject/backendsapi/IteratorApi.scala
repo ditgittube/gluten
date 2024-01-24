@@ -14,91 +14,82 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.backendsapi
 
 import io.glutenproject.GlutenNumaBindingInfo
-import io.glutenproject.execution.{BaseGlutenPartition, BroadCastHashJoinContext, WholestageTransformContext}
+import io.glutenproject.execution.{BaseGlutenPartition, BroadCastHashJoinContext, WholeStageTransformContext}
 import io.glutenproject.metrics.IMetrics
 import io.glutenproject.substrait.plan.PlanNode
 import io.glutenproject.substrait.rel.LocalFilesNode.ReadFileFormat
+import io.glutenproject.substrait.rel.SplitInfo
+
+import org.apache.spark._
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.connector.read.InputPartition
 import org.apache.spark.sql.execution.joins.BuildSideRelation
 import org.apache.spark.sql.execution.metric.SQLMetric
+import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.utils.OASPackageBridge.InputMetricsWrapper
 import org.apache.spark.sql.vectorized.ColumnarBatch
-import org.apache.spark._
 
 trait IteratorApi {
 
-  /**
-   * Generate native row partition.
-   *
-   * @return
-   */
-  def genFilePartition(index: Int,
-                       partitions: Seq[InputPartition],
-                       wsCxt: WholestageTransformContext): BaseGlutenPartition
+  def genSplitInfo(
+      partition: InputPartition,
+      partitionSchema: StructType,
+      fileFormat: ReadFileFormat): SplitInfo
+
+  /** Generate native row partition. */
+  def genPartitions(
+      wsCtx: WholeStageTransformContext,
+      splitInfos: Seq[Seq[SplitInfo]]): Seq[BaseGlutenPartition]
 
   /**
-   * Generate closeable ColumnBatch iterator.
-   *
-   * @return
+   * Inject the task attempt temporary path for native write files, this method should be called
+   * before `genFirstStageIterator` or `genFinalStageIterator`
    */
-  def genCloseableColumnBatchIterator(iter: Iterator[ColumnarBatch]): Iterator[ColumnarBatch]
+  def injectWriteFilesTempPath(path: String): Unit = throw new UnsupportedOperationException()
 
   /**
-   * Generate Iterator[ColumnarBatch] for first stage.
-   * ("first" means it does not depend on other SCAN inputs)
-   *
-   * @return
+   * Generate Iterator[ColumnarBatch] for first stage. ("first" means it does not depend on other
+   * SCAN inputs)
    */
-  def genFirstStageIterator(inputPartition: BaseGlutenPartition,
-                            outputAttributes: Seq[Attribute], context: TaskContext,
-                            pipelineTime: SQLMetric,
-                            updateInputMetrics: (InputMetricsWrapper) => Unit,
-                            updateNativeMetrics: IMetrics => Unit,
-                            inputIterators: Seq[Iterator[ColumnarBatch]] = Seq())
-  : Iterator[ColumnarBatch]
+  def genFirstStageIterator(
+      inputPartition: BaseGlutenPartition,
+      context: TaskContext,
+      pipelineTime: SQLMetric,
+      updateInputMetrics: (InputMetricsWrapper) => Unit,
+      updateNativeMetrics: IMetrics => Unit,
+      inputIterators: Seq[Iterator[ColumnarBatch]] = Seq()
+  ): Iterator[ColumnarBatch]
 
   /**
-   * Generate Iterator[ColumnarBatch] for final stage.
-   * ("Final" means it depends on other SCAN inputs, maybe it was a mistake to use the word "final")
-   *
-   * @return
+   * Generate Iterator[ColumnarBatch] for final stage. ("Final" means it depends on other SCAN
+   * inputs, maybe it was a mistake to use the word "final")
    */
   // scalastyle:off argcount
-  def genFinalStageIterator(inputIterators: Seq[Iterator[ColumnarBatch]],
-                            numaBindingInfo: GlutenNumaBindingInfo,
-                            sparkConf: SparkConf,
-                            outputAttributes: Seq[Attribute],
-                            rootNode: PlanNode,
-                            pipelineTime: SQLMetric,
-                            updateNativeMetrics: IMetrics => Unit,
-                            buildRelationBatchHolder: Seq[ColumnarBatch])
-  : Iterator[ColumnarBatch]
+  def genFinalStageIterator(
+      context: TaskContext,
+      inputIterators: Seq[Iterator[ColumnarBatch]],
+      numaBindingInfo: GlutenNumaBindingInfo,
+      sparkConf: SparkConf,
+      rootNode: PlanNode,
+      pipelineTime: SQLMetric,
+      updateNativeMetrics: IMetrics => Unit,
+      materializeInput: Boolean = false): Iterator[ColumnarBatch]
   // scalastyle:on argcount
 
-  /**
-   * Generate Native FileScanRDD, currently only for ClickHouse Backend.
-   */
-  def genNativeFileScanRDD(sparkContext: SparkContext,
-                           wsCxt: WholestageTransformContext,
-                           fileFormat: ReadFileFormat,
-                           inputPartitions: Seq[InputPartition],
-                           numOutputRows: SQLMetric,
-                           numOutputBatches: SQLMetric,
-                           scanTime: SQLMetric
-                          ): RDD[ColumnarBatch]
+  /** Generate Native FileScanRDD, currently only for ClickHouse Backend. */
+  def genNativeFileScanRDD(
+      sparkContext: SparkContext,
+      wsCxt: WholeStageTransformContext,
+      splitInfos: Seq[SplitInfo],
+      numOutputRows: SQLMetric,
+      numOutputBatches: SQLMetric,
+      scanTime: SQLMetric): RDD[ColumnarBatch]
 
-  /**
-   * Compute for BroadcastBuildSideRDD
-   */
-  def genBroadcastBuildSideIterator(split: Partition,
-                                    context: TaskContext,
-                                    broadcasted: broadcast.Broadcast[BuildSideRelation],
-                                    broadCastContext: BroadCastHashJoinContext
-                                   ): Iterator[ColumnarBatch]
+  /** Compute for BroadcastBuildSideRDD */
+  def genBroadcastBuildSideIterator(
+      broadcasted: broadcast.Broadcast[BuildSideRelation],
+      broadCastContext: BroadCastHashJoinContext): Iterator[ColumnarBatch]
 }

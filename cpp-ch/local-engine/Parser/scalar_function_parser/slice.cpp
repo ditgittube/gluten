@@ -1,3 +1,19 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #include <Parser/FunctionParser.h>
 #include <Common/CHUtil.h>
 #include <Core/Field.h>
@@ -78,18 +94,10 @@ public:
         const auto * arr_is_null_node = toFunctionNode(actions_dag, "isNull", {arr_arg});
         const auto * start_is_null_node = toFunctionNode(actions_dag, "isNull", {start_arg});
         const auto * length_is_null_node = toFunctionNode(actions_dag, "isNull", {length_arg});
+        const auto * or_condition_node = toFunctionNode(actions_dag, "or", {arr_is_null_node, start_is_null_node, length_is_null_node});
 
-        const auto * multi_if_ndoe = toFunctionNode(actions_dag, "multiIf", {
-            arr_is_null_node,
-            null_const_node,
-            start_is_null_node,
-            null_const_node,
-            length_is_null_node,
-            null_const_node,
-            wrap_slice_node
-        });
-
-        return multi_if_ndoe;
+        const auto * if_node = toFunctionNode(actions_dag, "if", {or_condition_node, null_const_node, wrap_slice_node });
+        return convertNodeTypeIfNeeded(substrait_func, if_node, actions_dag);
     }
 
 private:

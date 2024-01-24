@@ -14,12 +14,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.expression
 
 import io.glutenproject.backendsapi.BackendsApiManager
 import io.glutenproject.expression.ConverterUtils.FunctionConfig
 import io.glutenproject.substrait.expression.ExpressionBuilder
+
 import org.apache.spark.sql.catalyst.expressions.aggregate._
 import org.apache.spark.sql.types.DataType
 
@@ -27,23 +27,34 @@ object AggregateFunctionsBuilder {
   def create(args: java.lang.Object, aggregateFunc: AggregateFunction): Long = {
     val functionMap = args.asInstanceOf[java.util.HashMap[String, java.lang.Long]]
 
-    var substraitAggFuncName = getSubstraitFunctionName(aggregateFunc)
+    // First handle the custom aggregate functions
+    val (substraitAggFuncName, inputTypes) =
+      if (
+        ExpressionMappings.expressionExtensionTransformer.extensionExpressionsMapping.contains(
+          aggregateFunc.getClass)
+      ) {
+        ExpressionMappings.expressionExtensionTransformer.buildCustomAggregateFunction(
+          aggregateFunc)
+      } else {
+        val substraitAggFuncName = getSubstraitFunctionName(aggregateFunc)
 
-    // Check whether each backend supports this aggregate function.
-    if (!BackendsApiManager.getValidatorApiInstance.doExprValidate(
-      substraitAggFuncName.get, aggregateFunc)) {
-      throw new UnsupportedOperationException(
-        s"Aggregate function not supported for $aggregateFunc.")
-    }
+        // Check whether each backend supports this aggregate function.
+        if (
+          !BackendsApiManager.getValidatorApiInstance.doExprValidate(
+            substraitAggFuncName.get,
+            aggregateFunc)
+        ) {
+          throw new UnsupportedOperationException(
+            s"Aggregate function not supported for $aggregateFunc.")
+        }
 
-    val inputTypes: Seq[DataType] = aggregateFunc.children.map(child => child.dataType)
+        val inputTypes: Seq[DataType] = aggregateFunc.children.map(child => child.dataType)
+        (substraitAggFuncName, inputTypes)
+      }
 
     ExpressionBuilder.newScalarFunction(
       functionMap,
-      ConverterUtils.makeFuncName(
-        substraitAggFuncName.get,
-        inputTypes,
-        FunctionConfig.REQ))
+      ConverterUtils.makeFuncName(substraitAggFuncName.get, inputTypes, FunctionConfig.REQ))
   }
 
   def getSubstraitFunctionName(aggregateFunc: AggregateFunction): Option[String] = {

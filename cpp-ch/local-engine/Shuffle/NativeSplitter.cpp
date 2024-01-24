@@ -1,3 +1,19 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #include "NativeSplitter.h"
 #include <cstddef>
 #include <functional>
@@ -14,6 +30,7 @@
 #include <Common/Exception.h>
 #include <Common/JNIUtils.h>
 #include <Common/logger_useful.h>
+#include <Storages/IO/AggregateSerializationUtils.h>
 
 namespace local_engine
 {
@@ -65,7 +82,7 @@ void NativeSplitter::split(DB::Block & block)
         }
     }
 
-    for (size_t i = 0; i < options.partition_nums; ++i)
+    for (size_t i = 0; i < options.partition_num; ++i)
     {
         if (partition_buffer[i]->size() >= options.buffer_size)
         {
@@ -78,8 +95,8 @@ NativeSplitter::NativeSplitter(Options options_, jobject input_) : options(optio
 {
     GET_JNIENV(env)
     input = env->NewGlobalRef(input_);
-    partition_buffer.reserve(options.partition_nums);
-    for (size_t i = 0; i < options.partition_nums; ++i)
+    partition_buffer.reserve(options.partition_num);
+    for (size_t i = 0; i < options.partition_num; ++i)
     {
         partition_buffer.emplace_back(std::make_shared<ColumnsBuffer>(options.buffer_size));
     }
@@ -103,7 +120,7 @@ bool NativeSplitter::hasNext()
         }
         else
         {
-            for (size_t i = 0; i < options.partition_nums; ++i)
+            for (size_t i = 0; i < options.partition_num; ++i)
             {
                 auto buffer = partition_buffer.at(i);
                 if (buffer->size() > 0)
@@ -133,7 +150,7 @@ DB::Block * NativeSplitter::next()
     return &currentBlock();
 }
 
-int32_t NativeSplitter::nextPartitionId()
+int32_t NativeSplitter::nextPartitionId() const
 {
     return next_partition_id;
 }
@@ -153,6 +170,7 @@ int64_t NativeSplitter::inputNext()
     CLEAN_JNIENV
     return result;
 }
+
 std::unique_ptr<NativeSplitter> NativeSplitter::create(const std::string & short_name, Options options_, jobject input)
 {
     if (short_name == "rr")
@@ -165,7 +183,7 @@ std::unique_ptr<NativeSplitter> NativeSplitter::create(const std::string & short
     }
     else if (short_name == "single")
     {
-        options_.partition_nums = 1;
+        options_.partition_num = 1;
         return std::make_unique<RoundRobinNativeSplitter>(options_, input);
     }
     else if (short_name == "range")
@@ -193,7 +211,7 @@ HashNativeSplitter::HashNativeSplitter(NativeSplitter::Options options_, jobject
         output_columns_indicies.push_back(std::stoi(*iter));
     }
 
-    selector_builder = std::make_unique<HashSelectorBuilder>(options.partition_nums, hash_fields, "cityHash64");
+    selector_builder = std::make_unique<HashSelectorBuilder>(options.partition_num, hash_fields, options_.hash_algorithm);
 }
 
 void HashNativeSplitter::computePartitionId(Block & block)
@@ -208,7 +226,7 @@ RoundRobinNativeSplitter::RoundRobinNativeSplitter(NativeSplitter::Options optio
     {
         output_columns_indicies.push_back(std::stoi(*iter));
     }
-    selector_builder = std::make_unique<RoundRobinSelectorBuilder>(options_.partition_nums);
+    selector_builder = std::make_unique<RoundRobinSelectorBuilder>(options_.partition_num);
 }
 
 void RoundRobinNativeSplitter::computePartitionId(Block & block)
@@ -224,7 +242,7 @@ RangePartitionNativeSplitter::RangePartitionNativeSplitter(NativeSplitter::Optio
     {
         output_columns_indicies.push_back(std::stoi(*iter));
     }
-    selector_builder = std::make_unique<RangeSelectorBuilder>(options_.exprs_buffer, options_.partition_nums);
+    selector_builder = std::make_unique<RangeSelectorBuilder>(options_.exprs_buffer, options_.partition_num);
 }
 
 void RangePartitionNativeSplitter::computePartitionId(DB::Block & block)

@@ -31,10 +31,12 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.substrait.ToSubstraitType
 import org.apache.spark.substrait.ToSubstraitType.toNamedStruct
 
-import io.substrait.`type`.Type
+import io.substrait.{proto, relation}
+import io.substrait.debug.TreePrinter
 import io.substrait.expression.{Expression => SExpression, ExpressionCreator}
+import io.substrait.extension.ExtensionCollector
 import io.substrait.plan.{ImmutablePlan, ImmutableRoot, Plan}
-import io.substrait.relation
+import io.substrait.relation.RelProtoConverter
 
 import java.util.Collections
 
@@ -210,11 +212,6 @@ class ToSubstraitRel extends AbstractLogicalPlanVisitor with Logging {
       relation.Cross.builder
         .left(left)
         .right(right)
-        .deriveRecordType(
-          Type.Struct.builder
-            .from(left.getRecordType)
-            .from(right.getRecordType)
-            .build)
         .build
     } else {
       relation.Join.builder
@@ -322,6 +319,27 @@ class ToSubstraitRel extends AbstractLogicalPlanVisitor with Logging {
         ))
       .build()
   }
+
+  def tree(p: LogicalPlan): String = {
+    TreePrinter.tree(visit(p))
+  }
+
+  def toProtoSubstrait(p: LogicalPlan): Array[Byte] = {
+    val substraitRel = visit(p)
+
+    val extensionCollector = new ExtensionCollector
+    val relProtoConverter = new RelProtoConverter(extensionCollector)
+    val builder = proto.Plan
+      .newBuilder()
+      .addRelations(
+        proto.PlanRel
+          .newBuilder()
+          .setRel(substraitRel
+            .accept(relProtoConverter))
+      )
+    extensionCollector.addExtensionsToPlan(builder)
+    builder.build().toByteArray
+  }
 }
 
 private[logical] class WithLogicalSubQuery(toSubstraitRel: ToSubstraitRel)
@@ -331,9 +349,8 @@ private[logical] class WithLogicalSubQuery(toSubstraitRel: ToSubstraitRel)
 
   override protected def translateSubQuery(expr: PlanExpression[_]): Option[SExpression] = {
     expr match {
-      case s @ ScalarSubquery(childPlan, outerAttrs, _, joinCond)
-          if outerAttrs.isEmpty && joinCond.isEmpty =>
-        val rel = toSubstraitRel.visit(childPlan)
+      case s: ScalarSubquery if s.outerAttrs.isEmpty && s.joinCond.isEmpty =>
+        val rel = toSubstraitRel.visit(s.plan)
         Some(
           SExpression.ScalarSubquery.builder
             .input(rel)

@@ -1,3 +1,19 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #pragma once
 
 #include <Core/Field.h>
@@ -18,63 +34,6 @@ class SerializedPlanParser;
 class FunctionParser
 {
 public:
-    /// Manage scalar, aggregate and window functions by FunctionParser.
-    /// Usally we need to make pre-projections and a post-projection for functions.
-
-    /// CommonFunctionInfo is commmon representation for different function types, 
-    struct CommonFunctionInfo
-    {
-        /// basic common function informations
-        using Arguments = google::protobuf::RepeatedPtrField<substrait::FunctionArgument>;
-        using SortFields = google::protobuf::RepeatedPtrField<substrait::SortField>;
-        DB::Int32 function_ref;
-        Arguments arguments;
-        substrait::Type output_type;
-    
-        /// Following is for aggregate and window functions.
-        substrait::AggregationPhase phase;
-        SortFields sort_fields;
-        // only be used in aggregate functions at present.
-        substrait::Expression filter;
-        bool is_in_window = false;
-        bool is_aggregate_function = false;
-        bool has_filter = false;
-
-        CommonFunctionInfo()
-        {
-            function_ref = -1;
-        }
-
-        CommonFunctionInfo(const substrait::Expression_ScalarFunction & substrait_func)
-            : function_ref(substrait_func.function_reference())
-            , arguments(substrait_func.arguments())
-            , output_type(substrait_func.output_type())
-        {
-        }
-
-        CommonFunctionInfo(const substrait::WindowRel::Measure & win_measure)
-            : function_ref(win_measure.measure().function_reference())
-            , arguments(win_measure.measure().arguments())
-            , output_type(win_measure.measure().output_type())
-            , phase(win_measure.measure().phase())
-            , sort_fields(win_measure.measure().sorts())
-        {
-            is_in_window = true;
-            is_aggregate_function = true;
-        }
-
-        CommonFunctionInfo(const substrait::AggregateRel::Measure & agg_measure)
-            : function_ref(agg_measure.measure().function_reference())
-            , arguments(agg_measure.measure().arguments())
-            , output_type(agg_measure.measure().output_type())
-            , phase(agg_measure.measure().phase())
-            , sort_fields(agg_measure.measure().sorts())
-            , filter(agg_measure.filter())
-        {
-            has_filter = agg_measure.has_filter();
-            is_aggregate_function = true;
-        }
-    };
     explicit FunctionParser(SerializedPlanParser * plan_parser_) : plan_parser(plan_parser_) { }
 
     virtual ~FunctionParser() = default;
@@ -89,45 +48,6 @@ public:
     virtual const DB::ActionsDAG::Node * parse(
         const substrait::Expression_ScalarFunction & substrait_func,
         DB::ActionsDAGPtr & actions_dag) const;
-    /// We recomment to implement this in the subclass instead of the previous one.
-    /// The previous one is mainly for backward compatibility.
-    virtual const DB::ActionsDAG::Node * parse(
-        const CommonFunctionInfo & func_info,
-        DB::ActionsDAGPtr & actions_dag) const;
-
-    /// In some special cases, different arguments size or different arguments types may refer to different
-    /// CH function implementation.
-    virtual String getCHFunctionName(const CommonFunctionInfo & func_info) const;
-    /// In most cases, arguments size and types are enough to determine the CH function implementation.
-    /// This is only be used in SerializedPlanParser::parseNameStructure.
-    virtual String getCHFunctionName(const DB::DataTypes & args) const;
-
-    /// Do some preprojections for the function arguments, and return the necessary arguments for the CH function.
-    virtual DB::ActionsDAG::NodeRawConstPtrs parseFunctionArguments(
-        const CommonFunctionInfo & func_info,
-        const String & ch_func_name,
-        DB::ActionsDAGPtr & actions_dag) const;
-    DB::ActionsDAG::NodeRawConstPtrs parseFunctionArguments(
-        const CommonFunctionInfo & func_info,
-        DB::ActionsDAGPtr & actions_dag) const;
-
-    /// Make a postprojection for the function result.
-    virtual const DB::ActionsDAG::Node * convertNodeTypeIfNeeded(
-        const CommonFunctionInfo & func_info,
-        const DB::ActionsDAG::Node * func_node,
-        DB::ActionsDAGPtr & actions_dag) const;
-
-    /// Parameters are only used in aggregate functions at present. e.g. percentiles(0.5)(x).
-    /// 0.5 is the parameter of percentiles function.
-    virtual DB::Array parseFunctionParameters(const CommonFunctionInfo & /*func_info*/) const
-    {
-        return DB::Array();
-    }
-    /// Return the default parameters of the function. It's useful for creating a default function instance.
-    virtual DB::Array getDefaultFunctionParameters() const
-    {
-        return DB::Array();
-    }
 
 protected:
     virtual String getCHFunctionName(const substrait::Expression_ScalarFunction & substrait_func) const;
@@ -156,7 +76,7 @@ protected:
     {
         return plan_parser->toFunctionNode(action_dag, func_name, args);
     }
-    
+
     const DB::ActionsDAG::Node *
     toFunctionNode(DB::ActionsDAGPtr & action_dag, const String & func_name, const String & result_name, const DB::ActionsDAG::NodeRawConstPtrs & args) const
     {

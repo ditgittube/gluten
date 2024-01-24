@@ -14,68 +14,50 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.vectorized;
 
 import io.glutenproject.execution.BroadCastHashJoinContext;
 import io.glutenproject.expression.ConverterUtils;
 import io.glutenproject.expression.ConverterUtils$;
 import io.glutenproject.substrait.type.TypeNode;
+import io.glutenproject.utils.SubstraitUtil;
 
 import io.substrait.proto.NamedStruct;
 import io.substrait.proto.Type;
 import org.apache.spark.sql.catalyst.expressions.Attribute;
 import org.apache.spark.sql.catalyst.expressions.Expression;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
 import scala.collection.JavaConverters;
 
-public class StorageJoinBuilder implements AutoCloseable {
+public class StorageJoinBuilder {
 
   public static native void nativeCleanBuildHashTable(String hashTableId, long hashTableData);
 
   public static native long nativeCloneBuildHashTable(long hashTableData);
 
-  private ShuffleInputStream in;
-
-  private int customizeBufferSize;
-
-  private BroadCastHashJoinContext broadCastContext;
-
-  private List<Expression> newBuildKeys;
-
-  private List<Attribute> newOutput;
-
-  public StorageJoinBuilder(
-      ShuffleInputStream in,
-      BroadCastHashJoinContext broadCastContext,
-      int customizeBufferSize,
-      List<Attribute> newOutput,
-      List<Expression> newBuildKeys) {
-    this.in = in;
-    this.broadCastContext = broadCastContext;
-    this.newOutput = newOutput;
-    this.newBuildKeys = newBuildKeys;
-    this.customizeBufferSize = customizeBufferSize;
-  }
-
-  private native long nativeBuild(
+  private static native long nativeBuild(
       String buildHashTableId,
-      ShuffleInputStream in,
-      int customizeBufferSize,
+      byte[] in,
+      long rowCount,
       String joinKeys,
-      String joinType,
+      int joinType,
       byte[] namedStruct);
 
+  private StorageJoinBuilder() {}
+
   /** build storage join object */
-  public long build() {
+  public static long build(
+      byte[] batches,
+      long rowCount,
+      BroadCastHashJoinContext broadCastContext,
+      List<Expression> newBuildKeys,
+      List<Attribute> newOutput) {
     ConverterUtils$ converter = ConverterUtils$.MODULE$;
-    String join = converter.convertJoinType(broadCastContext.joinType());
-    List<Expression> keys = null;
-    List<Attribute> output = null;
+    List<Expression> keys;
+    List<Attribute> output;
     if (newBuildKeys.isEmpty()) {
       keys = JavaConverters.<Expression>seqAsJavaList(broadCastContext.buildSideJoinKeys());
       output = JavaConverters.<Attribute>seqAsJavaList(broadCastContext.buildSideStructure());
@@ -87,14 +69,23 @@ public class StorageJoinBuilder implements AutoCloseable {
         keys.stream()
             .map(
                 (Expression key) -> {
-                  Attribute attr = converter.getAttrFromExpr(key, false);
+                  Attribute attr = converter.getAttrFromExpr(key);
                   return converter.genColumnNameWithExprId(attr);
                 })
             .collect(Collectors.joining(","));
+    return nativeBuild(
+        broadCastContext.buildHashTableId(),
+        batches,
+        rowCount,
+        joinKey,
+        SubstraitUtil.toSubstrait(broadCastContext.joinType()).ordinal(),
+        toNameStruct(output).toByteArray());
+  }
 
-    // create table named struct
-    ArrayList<TypeNode> typeList = ConverterUtils.collectAttributeTypeNodes(output);
-    ArrayList<String> nameList = ConverterUtils.collectAttributeNamesWithExprId(output);
+  /** create table named struct */
+  private static NamedStruct toNameStruct(List<Attribute> output) {
+    List<TypeNode> typeList = ConverterUtils.collectAttributeTypeNodes(output);
+    List<String> nameList = ConverterUtils.collectAttributeNamesWithExprId(output);
     Type.Struct.Builder structBuilder = Type.Struct.newBuilder();
     for (TypeNode typeNode : typeList) {
       structBuilder.addTypes(typeNode.toProtobuf());
@@ -104,22 +95,6 @@ public class StorageJoinBuilder implements AutoCloseable {
     for (String name : nameList) {
       nStructBuilder.addNames(name);
     }
-    byte[] structure = nStructBuilder.build().toByteArray();
-    return nativeBuild(
-        broadCastContext.buildHashTableId(),
-        in,
-        this.customizeBufferSize,
-        joinKey,
-        join,
-        structure);
-  }
-
-  @Override
-  public void close() throws Exception {
-    try {
-      in.close();
-    } catch (Exception e) {
-      throw new RuntimeException(e);
-    }
+    return nStructBuilder.build();
   }
 }

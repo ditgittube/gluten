@@ -1,7 +1,24 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <Builder/SerializedPlanBuilder.h>
+#include <Compression/CompressedReadBuffer.h>
 #include <Functions/FunctionFactory.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/HashJoin.h>
@@ -35,6 +52,7 @@
 #include <Common/PODArray_fwd.h>
 #include <Common/Stopwatch.h>
 #include <Common/logger_useful.h>
+#include <Compression/CompressedReadBuffer.h>
 #include "testConfig.h"
 
 #if defined(__SSE2__)
@@ -115,7 +133,7 @@ DB::ContextMutablePtr global_context;
         param,
         std::move(settings));
     auto snapshot = std::make_shared<StorageSnapshot>(custom_merge_tree, metadata);
-    custom_merge_tree.loadDataParts(false);
+    custom_merge_tree.loadDataParts(false, {});
     for (auto _ : state)
     {
         state.PauseTiming();
@@ -233,7 +251,7 @@ DB::ContextMutablePtr global_context;
         "",
         param,
         std::move(settings));
-    custom_merge_tree.loadDataParts(false);
+    custom_merge_tree.loadDataParts(false, {});
     auto snapshot = std::make_shared<StorageSnapshot>(custom_merge_tree, metadata);
     for (auto _ : state)
     {
@@ -269,7 +287,7 @@ DB::ContextMutablePtr global_context;
             .io_buffer_size = DBMS_DEFAULT_BUFFER_SIZE,
             .data_file = root + "/data.dat",
             .map_id = 1,
-            .partition_nums = 4,
+            .partition_num = 4,
             .compress_method = local_engine::ShuffleSplitter::compress_methods[state.range(1)]};
         auto splitter = local_engine::ShuffleSplitter::create("rr", options);
         while (executor.pull(chunk))
@@ -321,7 +339,7 @@ DB::ContextMutablePtr global_context;
         "",
         param,
         std::move(settings));
-    custom_merge_tree.loadDataParts(false);
+    custom_merge_tree.loadDataParts(false, {});
     auto snapshot = std::make_shared<StorageSnapshot>(custom_merge_tree, metadata);
 
     for (auto _ : state)
@@ -358,7 +376,7 @@ DB::ContextMutablePtr global_context;
             .io_buffer_size = DBMS_DEFAULT_BUFFER_SIZE,
             .data_file = root + "/data.dat",
             .map_id = 1,
-            .partition_nums = 4,
+            .partition_num = 4,
             .compress_method = local_engine::ShuffleSplitter::compress_methods[state.range(1)]};
         auto splitter = local_engine::ShuffleSplitter::create("hash", options);
         while (executor.pull(chunk))
@@ -378,7 +396,7 @@ DB::ContextMutablePtr global_context;
     {
         auto read_buffer = std::make_unique<ReadBufferFromFile>("/tmp/test_shuffle/ZSTD/data.dat");
         //        read_buffer->seek(357841655, SEEK_SET);
-        auto shuffle_reader = local_engine::ShuffleReader(std::move(read_buffer), true);
+        auto shuffle_reader = local_engine::ShuffleReader(std::move(read_buffer), true, -1, -1);
         Block * block;
         int sum = 0;
         do
@@ -1301,7 +1319,7 @@ public:
         param,
         std::move(settings));
     auto snapshot = std::make_shared<StorageSnapshot>(custom_merge_tree, metadata);
-    custom_merge_tree.loadDataParts(false);
+    custom_merge_tree.loadDataParts(false, {});
     for (auto _ : state)
     {
         state.PauseTiming();
@@ -1356,7 +1374,7 @@ MergeTreeWithSnapshot buildMergeTree(NamesAndTypesList names_and_types, std::str
     std::shared_ptr<local_engine::CustomStorageMergeTree> custom_merge_tree = std::make_shared<local_engine::CustomStorageMergeTree>(
         DB::StorageID("default", table), relative_path, *metadata, false, global_context, "", param, std::move(settings));
     auto snapshot = std::make_shared<StorageSnapshot>(*custom_merge_tree, metadata);
-    custom_merge_tree->loadDataParts(false);
+    custom_merge_tree->loadDataParts(false, {});
     return MergeTreeWithSnapshot{.merge_tree = custom_merge_tree, .snapshot = snapshot, .columns = names_and_types};
 }
 
@@ -1382,7 +1400,7 @@ QueryPlanPtr joinPlan(QueryPlanPtr left, QueryPlanPtr right, String left_key, St
     join->addDisjunct();
     ASTPtr lkey = std::make_shared<ASTIdentifier>(left_key);
     ASTPtr rkey = std::make_shared<ASTIdentifier>(right_key);
-    join->addOnKeys(lkey, rkey);
+    join->addOnKeys(lkey, rkey, true);
     for (const auto & column : join->columnsFromJoinedTable())
     {
         join->addJoinedColumn(column);

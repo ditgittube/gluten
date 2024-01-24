@@ -14,20 +14,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.spark.rpc
 
 import io.glutenproject.backendsapi.BackendsApiManager
-import org.apache.spark.internal.{Logging, config}
+
+import org.apache.spark.{SparkConf, SparkEnv}
+import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.rpc.GlutenRpcMessages._
 import org.apache.spark.util.ThreadUtils
-import org.apache.spark.{SparkConf, SparkEnv}
 
 import scala.util.{Failure, Success}
 
-/**
- * Gluten executor endpoint.
- */
+/** Gluten executor endpoint. */
 class GlutenExecutorEndpoint(val executorId: String, val conf: SparkConf)
   extends IsolatedRpcEndpoint
   with Logging {
@@ -35,13 +33,15 @@ class GlutenExecutorEndpoint(val executorId: String, val conf: SparkConf)
 
   private val driverHost = conf.get(config.DRIVER_HOST_ADDRESS.key, "localhost")
   private val driverPort = conf.getInt(config.DRIVER_PORT.key, 7077)
+  private val rpcAddress = RpcAddress(driverHost, driverPort)
   private val driverUrl =
-    s"spark://${GlutenRpcConstants.GLUTEN_DRIVER_ENDPOINT_NAME}@$driverHost:$driverPort"
+    RpcEndpointAddress(rpcAddress, GlutenRpcConstants.GLUTEN_DRIVER_ENDPOINT_NAME).toString
 
   @volatile var driverEndpointRef: RpcEndpointRef = null
 
   rpcEnv.setupEndpoint(GlutenRpcConstants.GLUTEN_EXECUTOR_ENDPOINT_NAME, this)
-
+  // TODO(yuan): get thread cnt from spark context
+  override def threadCount(): Int = 1
   override def onStart(): Unit = {
     rpcEnv
       .asyncSetupEndpointRefByURI(driverUrl)
@@ -60,7 +60,7 @@ class GlutenExecutorEndpoint(val executorId: String, val conf: SparkConf)
 
   override def receive: PartialFunction[Any, Unit] = {
     case GlutenCleanExecutionResource(executionId, hashIds) =>
-      BackendsApiManager.getContextApiInstance
+      BackendsApiManager.getBroadcastApiInstance
         .cleanExecutionBroadcastHashtable(executionId, hashIds)
 
     case e =>

@@ -1,7 +1,23 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #pragma once
-#include "CommonAggregateFunctionParser.h"
 #include <DataTypes/DataTypeNullable.h>
 #include <Interpreters/ActionsDAG.h>
+#include <Parser/AggregateFunctionParser.h>
 
 namespace DB
 {
@@ -16,10 +32,10 @@ namespace local_engine
 // groupArray is used to implement collect_list in spark. But there is a difference between them.
 // If all elements are null, collect_list will return [], but groupArray will return null. And clickhosue
 // has backward compatibility issue, we cannot modify the inner implementation of groupArray
-class CollectFunctionParser : public BaseAggregateFunctionParser
+class CollectFunctionParser : public AggregateFunctionParser
 {
 public:
-    explicit CollectFunctionParser(SerializedPlanParser * plan_parser_) : BaseAggregateFunctionParser(plan_parser_) { }
+    explicit CollectFunctionParser(SerializedPlanParser * plan_parser_) : AggregateFunctionParser(plan_parser_) { }
     ~CollectFunctionParser() override = default;
     virtual String getName() const override
     {

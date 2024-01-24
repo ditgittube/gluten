@@ -17,49 +17,53 @@
 package io.glutenproject.extension
 
 import io.glutenproject.expression.{ExpressionTransformer, Sig}
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
+import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateFunction, AggregateMode}
+import org.apache.spark.sql.types.DataType
+
+import scala.collection.mutable.ListBuffer
 
 trait ExpressionExtensionTrait {
 
-  /**
-   * Generate the extension expressions list,
-   * format: Sig[XXXExpression]("XXXExpressionName")
-   */
+  /** Generate the extension expressions list, format: Sig[XXXExpression]("XXXExpressionName") */
   def expressionSigList: Seq[Sig]
 
-  /**
-   * Generate the extension expressions mapping map
-   */
+  /** Generate the extension expressions mapping map */
   def extensionExpressionsMapping: Map[Class[_], String] =
     expressionSigList.map(s => (s.expClass, s.name)).toMap[Class[_], String]
 
-  /**
-   * Replace extension expression to transformer.
-   */
+  /** Replace extension expression to transformer. */
   def replaceWithExtensionExpressionTransformer(
-    substraitExprName: String,
-    expr: Expression,
-    attributeSeq: Seq[Attribute]): ExpressionTransformer
+      substraitExprName: String,
+      expr: Expression,
+      attributeSeq: Seq[Attribute]): ExpressionTransformer = {
+    throw new UnsupportedOperationException(s"${expr.getClass} or $expr is not supported.")
+  }
+
+  /** Get the attribute index of the extension aggregate functions. */
+  def getAttrsIndexForExtensionAggregateExpr(
+      aggregateFunc: AggregateFunction,
+      mode: AggregateMode,
+      exp: AggregateExpression,
+      aggregateAttributeList: Seq[Attribute],
+      aggregateAttr: ListBuffer[Attribute],
+      resIndex: Int): Int = {
+    throw new UnsupportedOperationException(
+      s"Aggregate function ${aggregateFunc.getClass} is not supported.")
+  }
+
+  /** Get the custom agg function substrait name and the input types of the child */
+  def buildCustomAggregateFunction(
+      aggregateFunc: AggregateFunction): (Option[String], Seq[DataType]) = {
+    throw new UnsupportedOperationException(
+      s"Aggregate function ${aggregateFunc.getClass} is not supported.")
+  }
 }
 
 case class DefaultExpressionExtensionTransformer() extends ExpressionExtensionTrait with Logging {
 
-  /**
-   * Generate the extension expressions list,
-   * format: Sig[XXXExpression]("XXXExpressionName")
-   */
+  /** Generate the extension expressions list, format: Sig[XXXExpression]("XXXExpressionName") */
   override def expressionSigList: Seq[Sig] = Seq.empty[Sig]
-
-  /**
-   * Replace extension expression to transformer.
-   */
-  override def replaceWithExtensionExpressionTransformer(
-    substraitExprName: String,
-    expr: Expression,
-    attributeSeq: Seq[Attribute]): ExpressionTransformer = {
-    logWarning(s"${expr.getClass} or $expr is not currently supported.")
-    throw new UnsupportedOperationException(
-      s"${expr.getClass} or $expr is not currently supported.")
-  }
 }

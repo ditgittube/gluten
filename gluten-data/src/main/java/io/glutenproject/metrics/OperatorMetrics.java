@@ -14,7 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.metrics;
 
 public class OperatorMetrics implements IOperatorMetrics {
@@ -43,10 +42,15 @@ public class OperatorMetrics implements IOperatorMetrics {
   public long processedSplits;
   public long skippedStrides;
   public long processedStrides;
+  public long remainingFilterTime;
+  public long ioWaitTime;
+  public long preloadSplits;
 
-  /**
-   * Create an instance for operator metrics.
-   */
+  public long physicalWrittenBytes;
+
+  public long numWrittenFiles;
+
+  /** Create an instance for operator metrics. */
   public OperatorMetrics(
       long inputRows,
       long inputVectors,
@@ -72,7 +76,12 @@ public class OperatorMetrics implements IOperatorMetrics {
       long skippedSplits,
       long processedSplits,
       long skippedStrides,
-      long processedStrides) {
+      long processedStrides,
+      long remainingFilterTime,
+      long ioWaitTime,
+      long preloadSplits,
+      long physicalWrittenBytes,
+      long numWrittenFiles) {
     this.inputRows = inputRows;
     this.inputVectors = inputVectors;
     this.inputBytes = inputBytes;
@@ -98,5 +107,10 @@ public class OperatorMetrics implements IOperatorMetrics {
     this.processedSplits = processedSplits;
     this.skippedStrides = skippedStrides;
     this.processedStrides = processedStrides;
+    this.remainingFilterTime = remainingFilterTime;
+    this.ioWaitTime = ioWaitTime;
+    this.preloadSplits = preloadSplits;
+    this.physicalWrittenBytes = physicalWrittenBytes;
+    this.numWrittenFiles = numWrittenFiles;
   }
 }

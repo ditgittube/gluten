@@ -1,3 +1,19 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #include "WindowRelParser.h"
 #include <exception>
 #include <memory>
@@ -9,12 +25,13 @@
 #include <Core/SortDescription.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <DataTypes/IDataType.h>
-#include <Functions/FunctionFactory.h>
+#include <AggregateFunctions/AggregateFunctionFactory.h>
 #include <IO/WriteBufferFromString.h>
 #include <Interpreters/ActionsDAG.h>
 #include <Interpreters/WindowDescription.h>
 #include <Parser/RelParser.h>
 #include <Parser/SortRelParser.h>
+#include <Parser/TypeParser.h>
 #include <Processors/QueryPlan/ExpressionStep.h>
 #include <Processors/QueryPlan/WindowStep.h>
 #include <base/sort.h>
@@ -52,7 +69,7 @@ WindowRelParser::parse(DB::QueryPlanPtr current_plan_, const substrait::Rel & re
         const auto & win_function = measure.measure();
         ColumnWithTypeAndName named_col;
         named_col.name = win_function.column_name();
-        named_col.type = parseType(win_function.output_type());
+        named_col.type = TypeParser::parseType(win_function.output_type());
         named_col.column = named_col.type->createColumn();
         output_header.insert(named_col);
     }
@@ -67,7 +84,7 @@ WindowRelParser::parse(DB::QueryPlanPtr current_plan_, const substrait::Rel & re
     {
         auto & win = it.second;
         
-        auto window_step = std::make_unique<DB::WindowStep>(current_plan->getCurrentDataStream(), win, win.window_functions);
+        auto window_step = std::make_unique<DB::WindowStep>(current_plan->getCurrentDataStream(), win, win.window_functions, false);
         window_step->setStepDescription("Window step for window '" + win.window_name + "'");
         steps.emplace_back(window_step.get());
         current_plan->addStep(std::move(window_step));
@@ -98,9 +115,9 @@ WindowRelParser::parseWindowDescription(const WindowInfo & win_info)
 }
 
 /// In CH, it put all functions into one window description if they have the same partition expressions and sort fields.
-std::unordered_map<DB::String, WindowDescription> WindowRelParser::parseWindowDescriptions()
+std::unordered_map<String, WindowDescription> WindowRelParser::parseWindowDescriptions()
 {
-    std::unordered_map<DB::String, WindowDescription> window_descriptions;
+    std::unordered_map<String, WindowDescription> window_descriptions;
     for (size_t i = 0; i < win_infos.size(); ++i)
     {
         auto & win_info = win_infos[i];
@@ -246,13 +263,21 @@ DB::SortDescription WindowRelParser::parsePartitionBy(const google::protobuf::Re
     DB::SortDescription sort_descr;
     for (const auto & expr : expressions)
     {
-        if (!expr.has_selection())
+        if (expr.has_selection())
         {
-            throw DB::Exception(ErrorCodes::LOGICAL_ERROR, "Column reference is expected.");
+            auto pos = expr.selection().direct_reference().struct_field().field();
+            auto col_name = header.getByPosition(pos).name;
+            sort_descr.push_back(DB::SortColumnDescription(col_name, 1, 1));
         }
-        auto pos = expr.selection().direct_reference().struct_field().field();
-        auto col_name = header.getByPosition(pos).name;
-        sort_descr.push_back(DB::SortColumnDescription(col_name, 1, 1));
+        else if (expr.has_literal())
+        {
+            // literal is a special case, see in #2586
+            continue;
+        }
+        else
+        {
+            throw DB::Exception(ErrorCodes::LOGICAL_ERROR, "Unknow partition argument type: {}", expr.DebugString());
+        }
     }
     return sort_descr;
 }
@@ -285,8 +310,8 @@ void WindowRelParser::initWindowsInfos(const substrait::WindowRel & win_rel)
         win_info.result_column_name = measure.measure().column_name();
         win_info.measure = &measure;
         win_info.signature_function_name = *parseSignatureFunctionName(measure.measure().function_reference());
-        win_info.parser_func_info = FunctionParser::CommonFunctionInfo(measure);
-        win_info.function_parser = FunctionParserFactory::instance().get(win_info.signature_function_name, getPlanParser());
+        win_info.parser_func_info = AggregateFunctionParser::CommonFunctionInfo(measure);
+        win_info.function_parser = AggregateFunctionParserFactory::instance().get(win_info.signature_function_name, getPlanParser());
         win_info.function_name = win_info.function_parser->getCHFunctionName(win_info.parser_func_info);
         win_info.partition_exprs = win_rel.partition_expressions();
         win_info.sort_fields = win_rel.sorts();
@@ -309,7 +334,7 @@ void WindowRelParser::tryAddProjectionBeforeWindow()
             win_info.arg_column_types.emplace_back(arg_node->result_type);
             actions_dag->addOrReplaceInOutputs(*arg_node);
         } 
-        win_info.params = win_info.function_parser->parseFunctionParameters(win_info.parser_func_info);       
+        win_info.params = win_info.function_parser->parseFunctionParameters(win_info.parser_func_info, arg_nodes);       
     }
 
     if (actions_dag->dumpDAG() != dag_footprint)

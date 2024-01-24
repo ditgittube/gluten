@@ -18,46 +18,42 @@
 #pragma once
 
 #include <arrow/io/api.h>
+#include <arrow/memory_pool.h>
 
 #include "shuffle/rss/RemotePartitionWriter.h"
-
-#include "jni/JniCommon.h"
-#include "shuffle/PartitionWriterCreator.h"
-#include "shuffle/utils.h"
+#include "shuffle/rss/RssClient.h"
 #include "utils/macros.h"
 
 namespace gluten {
 
-class CelebornPartitionWriter : public RemotePartitionWriter {
+class CelebornPartitionWriter final : public RemotePartitionWriter {
  public:
-  CelebornPartitionWriter(ShuffleWriter* shuffleWriter, std::shared_ptr<CelebornClient> celebornClient)
-      : RemotePartitionWriter(shuffleWriter) {
-    celebornClient_ = celebornClient;
+  CelebornPartitionWriter(
+      uint32_t numPartitions,
+      PartitionWriterOptions options,
+      arrow::MemoryPool* pool,
+      std::shared_ptr<RssClient> celebornClient)
+      : RemotePartitionWriter(numPartitions, std::move(options), pool), celebornClient_(celebornClient) {
+    init();
   }
 
-  arrow::Status init() override;
+  arrow::Status evict(
+      uint32_t partitionId,
+      std::unique_ptr<InMemoryPayload> inMemoryPayload,
+      Evict::type evictType,
+      bool reuseBuffers,
+      bool hasComplexType) override;
 
-  arrow::Status evictPartition(int32_t partitionId) override;
+  arrow::Status reclaimFixedSize(int64_t size, int64_t* actual) override;
 
-  arrow::Status stop() override;
-
-  arrow::Status pushPartition(int32_t partitionId);
-
-  arrow::Status writeArrowToOutputStream(int32_t partitionId);
-
-  std::shared_ptr<arrow::io::BufferOutputStream> celebornBufferOs_;
-
-  std::shared_ptr<CelebornClient> celebornClient_;
-};
-
-class CelebornPartitionWriterCreator : public ShuffleWriter::PartitionWriterCreator {
- public:
-  explicit CelebornPartitionWriterCreator(std::shared_ptr<CelebornClient> client);
-
-  arrow::Result<std::shared_ptr<ShuffleWriter::PartitionWriter>> make(ShuffleWriter* shuffleWriter) override;
+  arrow::Status stop(ShuffleWriterMetrics* metrics) override;
 
  private:
-  std::shared_ptr<CelebornClient> client_;
-};
+  void init();
 
+  std::shared_ptr<RssClient> celebornClient_;
+
+  std::vector<int64_t> bytesEvicted_;
+  std::vector<int64_t> rawPartitionLengths_;
+};
 } // namespace gluten

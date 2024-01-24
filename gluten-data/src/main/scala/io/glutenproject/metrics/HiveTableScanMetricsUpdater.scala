@@ -14,13 +14,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.metrics
 
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.utils.OASPackageBridge.InputMetricsWrapper
 
-class HiveTableScanMetricsUpdater (@transient val metrics: Map[String, SQLMetric])
+class HiveTableScanMetricsUpdater(@transient val metrics: Map[String, SQLMetric])
   extends MetricsUpdater {
   val rawInputRows: SQLMetric = metrics("rawInputRows")
   val rawInputBytes: SQLMetric = metrics("rawInputBytes")
@@ -37,8 +36,11 @@ class HiveTableScanMetricsUpdater (@transient val metrics: Map[String, SQLMetric
   val numDynamicFiltersAccepted: SQLMetric = metrics("numDynamicFiltersAccepted")
   val skippedSplits: SQLMetric = metrics("skippedSplits")
   val processedSplits: SQLMetric = metrics("processedSplits")
+  val preloadSplits: SQLMetric = metrics("preloadSplits")
   val skippedStrides: SQLMetric = metrics("skippedStrides")
   val processedStrides: SQLMetric = metrics("processedStrides")
+  val remainingFilterTime: SQLMetric = metrics("remainingFilterTime")
+  val ioWaitTime: SQLMetric = metrics("ioWaitTime")
 
   override def updateInputMetrics(inputMetrics: InputMetricsWrapper): Unit = {
     inputMetrics.bridgeIncBytesRead(rawInputBytes.value)
@@ -64,6 +66,9 @@ class HiveTableScanMetricsUpdater (@transient val metrics: Map[String, SQLMetric
       processedSplits += operatorMetrics.processedSplits
       skippedStrides += operatorMetrics.skippedStrides
       processedStrides += operatorMetrics.processedStrides
+      remainingFilterTime += operatorMetrics.remainingFilterTime
+      ioWaitTime += operatorMetrics.ioWaitTime
+      preloadSplits += operatorMetrics.preloadSplits
     }
   }
 }

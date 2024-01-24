@@ -16,12 +16,13 @@
  */
 package io.glutenproject.execution.metrics
 
-import io.glutenproject.execution.{BasicScanExecTransformer, ColumnarNativeIterator, FileSourceScanExecTransformer, FilterExecTransformerBase, GlutenClickHouseTPCHAbstractSuite, HashAggregateExecBaseTransformer, ProjectExecTransformer, WholeStageTransformer}
+import io.glutenproject.execution.{BasicScanExecTransformer, ColumnarNativeIterator, FileSourceScanExecTransformer, FilterExecTransformerBase, GenerateExecTransformer, GlutenClickHouseTPCHAbstractSuite, HashAggregateExecBaseTransformer, ProjectExecTransformer, WholeStageTransformer}
 import io.glutenproject.extension.GlutenPlan
 import io.glutenproject.vectorized.GeneralInIterator
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.expressions.Attribute
+import org.apache.spark.sql.execution.InputIteratorTransformer
 
 import scala.collection.JavaConverters._
 
@@ -46,6 +47,9 @@ class GlutenClickHouseTPCHMetricsSuite extends GlutenClickHouseTPCHAbstractSuite
       .set("spark.sql.shuffle.partitions", "1")
       .set("spark.sql.autoBroadcastJoinThreshold", "10MB")
       .set("spark.gluten.sql.columnar.backend.ch.use.v2", "false")
+      .set(
+        "spark.gluten.sql.columnar.backend.ch.runtime_config.enable_streaming_aggregating",
+        "true")
   }
 
   override protected def createTPCHNotNullTables(): Unit = {
@@ -63,7 +67,7 @@ class GlutenClickHouseTPCHMetricsSuite extends GlutenClickHouseTPCHAbstractSuite
 
         assert(plans(2).metrics("numFiles").value === 1)
         assert(plans(2).metrics("pruningTime").value === -1)
-        assert(plans(2).metrics("filesSize").value === 17777735)
+        assert(plans(2).metrics("filesSize").value === 19230111)
 
         assert(plans(1).metrics("outputRows").value === 4)
         assert(plans(1).metrics("outputVectors").value === 1)
@@ -71,6 +75,24 @@ class GlutenClickHouseTPCHMetricsSuite extends GlutenClickHouseTPCHAbstractSuite
         // Execute Sort operator, it will read the data twice.
         assert(plans(0).metrics("outputRows").value === 4)
         assert(plans(0).metrics("outputVectors").value === 1)
+    }
+  }
+
+  test("test Generate metrics") {
+    val sql =
+      """
+        |select n_nationkey, a from nation lateral view explode(split(n_comment, ' ')) as a
+        |order by n_nationkey, a
+        |""".stripMargin
+    runQueryAndCompare(sql) {
+      df =>
+        val plans = df.queryExecution.executedPlan.collect {
+          case generate: GenerateExecTransformer => generate
+        }
+        assert(plans.size == 1)
+        assert(plans.head.metrics("inputRows").value == 25)
+        assert(plans.head.metrics("outputRows").value == 266)
+        assert(plans.head.metrics("outputVectors").value == 1)
     }
   }
 
@@ -86,7 +108,7 @@ class GlutenClickHouseTPCHMetricsSuite extends GlutenClickHouseTPCHAbstractSuite
 
           assert(plans(2).metrics("numFiles").value === 1)
           assert(plans(2).metrics("pruningTime").value === -1)
-          assert(plans(2).metrics("filesSize").value === 17777735)
+          assert(plans(2).metrics("filesSize").value === 19230111)
 
           assert(plans(1).metrics("outputRows").value === 4)
           assert(plans(1).metrics("outputVectors").value === 1)
@@ -202,16 +224,18 @@ class GlutenClickHouseTPCHMetricsSuite extends GlutenClickHouseTPCHAbstractSuite
       metricsJsonFilePath + "/tpch-q2-wholestage-2-metrics.json"
     ) {
       () =>
-        val allGlutenPlans = wholeStageTransformer1.collect { case g: GlutenPlan => g }
+        val allGlutenPlans = wholeStageTransformer1.collect {
+          case g: GlutenPlan if !g.isInstanceOf[InputIteratorTransformer] => g
+        }
 
-        val scanPlan = allGlutenPlans(10)
+        val scanPlan = allGlutenPlans(9)
         assert(scanPlan.metrics("scanTime").value == 2)
         assert(scanPlan.metrics("inputWaitTime").value == 3)
         assert(scanPlan.metrics("outputWaitTime").value == 1)
         assert(scanPlan.metrics("outputRows").value == 80000)
         assert(scanPlan.metrics("outputBytes").value == 2160000)
 
-        val filterPlan = allGlutenPlans(9)
+        val filterPlan = allGlutenPlans(8)
         assert(filterPlan.metrics("totalTime").value == 1)
         assert(filterPlan.metrics("inputWaitTime").value == 13)
         assert(filterPlan.metrics("outputWaitTime").value == 1)
@@ -220,7 +244,7 @@ class GlutenClickHouseTPCHMetricsSuite extends GlutenClickHouseTPCHAbstractSuite
         assert(filterPlan.metrics("inputRows").value == 80000)
         assert(filterPlan.metrics("inputBytes").value == 2160000)
 
-        val joinPlan = allGlutenPlans(3)
+        val joinPlan = allGlutenPlans(2)
         assert(joinPlan.metrics("totalTime").value == 1)
         assert(joinPlan.metrics("inputWaitTime").value == 6)
         assert(joinPlan.metrics("outputWaitTime").value == 0)
@@ -237,12 +261,14 @@ class GlutenClickHouseTPCHMetricsSuite extends GlutenClickHouseTPCHAbstractSuite
       metricsJsonFilePath + "/tpch-q2-wholestage-11-metrics.json"
     ) {
       () =>
-        val allGlutenPlans = wholeStageTransformer2.collect { case g: GlutenPlan => g }
+        val allGlutenPlans = wholeStageTransformer2.collect {
+          case g: GlutenPlan if !g.isInstanceOf[InputIteratorTransformer] => g
+        }
 
-        assert(allGlutenPlans.size == 58)
+        assert(allGlutenPlans.size == 57)
 
         val shjPlan = allGlutenPlans(8)
-        assert(shjPlan.metrics("totalTime").value == 7)
+        assert(shjPlan.metrics("totalTime").value == 6)
         assert(shjPlan.metrics("inputWaitTime").value == 5)
         assert(shjPlan.metrics("outputWaitTime").value == 0)
         assert(shjPlan.metrics("outputRows").value == 44)
@@ -307,21 +333,20 @@ class GlutenClickHouseTPCHMetricsSuite extends GlutenClickHouseTPCHAbstractSuite
         .getProcessors
         .get(0)
         .getInputRows == 591673)
-
     assert(
       nativeMetricsData.metricsDataList
         .get(4)
         .getSteps
-        .get(1)
+        .get(0)
         .getProcessors
-        .get(1)
+        .get(0)
         .getOutputRows == 4)
 
     assert(
       nativeMetricsData.metricsDataList
         .get(4)
         .getSteps
-        .get(1)
+        .get(0)
         .getProcessors
         .get(0)
         .getOutputRows == 4)
@@ -351,7 +376,7 @@ class GlutenClickHouseTPCHMetricsSuite extends GlutenClickHouseTPCHAbstractSuite
         .getSteps
         .get(0)
         .getName
-        .equals("MergingAggregated"))
+        .equals("GraceMergingAggregatedStep"))
     assert(
       nativeMetricsDataFinal.metricsDataList.get(1).getSteps.get(1).getName.equals("Expression"))
     assert(nativeMetricsDataFinal.metricsDataList.get(2).getName.equals("kProject"))

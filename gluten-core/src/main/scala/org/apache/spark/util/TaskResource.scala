@@ -14,7 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.spark.util
 
 /**
@@ -26,5 +25,7 @@ trait TaskResource {
   def release(): Unit
 
   // #release() will be called in higher precedence if the manager has higher priority
-  def priority(): Long = 100
+  def priority(): Int = 100
+
+  def resourceName(): String
 }

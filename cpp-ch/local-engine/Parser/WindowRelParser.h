@@ -1,12 +1,27 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #pragma once
 #include <unordered_map>
 #include <Core/Field.h>
 #include <Core/SortDescription.h>
 #include <DataTypes/IDataType.h>
 #include <Interpreters/WindowDescription.h>
-#include <Parser/FunctionParser.h>
+#include <Parser/AggregateFunctionParser.h>
 #include <Parser/RelParser.h>
-#include <Parser/aggregate_function_parser/CommonAggregateFunctionParser.h>
 #include <Processors/QueryPlan/QueryPlan.h>
 #include <Poco/Logger.h>
 #include <Common/logger_useful.h>
@@ -20,6 +35,7 @@ public:
     ~WindowRelParser() override = default;
     DB::QueryPlanPtr
     parse(DB::QueryPlanPtr current_plan_, const substrait::Rel & rel, std::list<const substrait::Rel *> & rel_stack_) override;
+    const substrait::Rel & getSingleInput(const substrait::Rel & rel) override { return rel.window().input(); }
 
 private:
     struct WindowInfo
@@ -33,13 +49,12 @@ private:
         // function name in CH
         String function_name;
         // For avoiding repeated builds.
-        FunctionParser::CommonFunctionInfo parser_func_info;
+        AggregateFunctionParser::CommonFunctionInfo parser_func_info;
         // For avoiding repeated builds.
-        FunctionParserPtr function_parser;
+        AggregateFunctionParserPtr function_parser;
 
         google::protobuf::RepeatedPtrField<substrait::Expression> partition_exprs;
         google::protobuf::RepeatedPtrField<substrait::SortField> sort_fields;
-
     };
     DB::QueryPlanPtr current_plan;
     DB::Block input_header;
@@ -53,8 +68,7 @@ private:
 
     // Build a window description in CH with respect to a window function, since the same
     // function may have different window frame in CH and spark.
-    DB::WindowDescription
-    parseWindowDescription(const WindowInfo & win_info);
+    DB::WindowDescription parseWindowDescription(const WindowInfo & win_info);
     DB::WindowFrame parseWindowFrame(const WindowInfo & win_info);
     DB::WindowFrame::FrameType
     parseWindowFrameType(const std::string & function_name, const substrait::Expression::WindowFunction & window_function);

@@ -41,32 +41,14 @@ To debug C++, you have to generate the example files, the example files consist 
 
 You can generate the example files by the following steps:
 
-1. get and build Arrow
+1. build Velox and Gluten CPP
 ```
-cd gluten_home/ep/build-arrow/src
-./get_arrow.sh
-./build_arrow.sh --build_tests=ON --build_benchmarks=ON
-```
-
-2. get and build Velox
-```
-cd gluten_home/ep/build-velox/src
-./get_velox.sh
-./build_velox.sh --build_type=Debug
-```
-
-3. compile the CPP
-```
-cd gluten_home/cpp
-mkdir build
-cd build
-cmake -DBUILD_VELOX_BACKEND=ON -DBUILD_TESTS=ON -DBUILD_BENCHMARKS=ON -DCMAKE_BUILD_TYPE=Debug ..
-make -j
+gluten_home/dev/builddeps-veloxbe.sh --build_tests=ON --build_benchmarks=ON --build_type=Debug
 ```
 - Compiling with `--build_type=Debug` is good for debugging.
 - The executable file `generic_benchmark` will be generated under the directory of `gluten_home/cpp/build/velox/benchmarks/`.
 
-4. build Gluten and generate the example files
+2. build Gluten and generate the example files
 ```
 cd gluten_home
 mvn clean package -Pspark-3.2 -Pbackends-velox -Prss
@@ -87,7 +69,7 @@ gluten_home/backends-velox/generated-native-benchmark/
     └── _SUCCESS
 ```
 
-5. now, run benchmarks with GDB
+3. now, run benchmarks with GDB
 ```
 cd gluten_home/cpp/build/velox/benchmarks/
 gdb generic_benchmark
@@ -99,20 +81,27 @@ gdb generic_benchmark
 - Actually, you can debug `generic_benchmark` with any gdb commands as debugging normal C++ program, because the `generic_benchmark` is a pure C++
   executable file in fact.
 
-6. `gdb-tui` is a valuable feature and is worth trying. You can get more help from the online docs.
+4. `gdb-tui` is a valuable feature and is worth trying. You can get more help from the online docs.
 [gdb-tui](https://sourceware.org/gdb/onlinedocs/gdb/TUI.html)
 
-7. you can start `generic_benchmark` with specific JSON plan and input files
+5. you can start `generic_benchmark` with specific JSON plan and input files
 - If you omit them, the `example.json, example_lineitem + example_orders` under the directory of `gluten_home/backends-velox/generated-native-benchmark`
   will be used as default.
 - You can also edit the file `example.json` to custom the Substrait plan or specify the inputs files placed in the other directory.
 
-8. get more detail information about benchmarks from [MicroBenchmarks](./MicroBenchmarks.md)
+6. get more detail information about benchmarks from [MicroBenchmarks](./MicroBenchmarks.md)
 
-## 2 How to debug Java/Scala
+## 2 How to debug plan validation process
+Gluten will validate generated plan before execute it, and validation usually happens in native side, so we provide a utility to help debug validation process in native side.
+
+1. Run query with conf `spark.gluten.sql.debug=true`, and you will find generated plan be printed in stderr with json format, save it as `plan.json` for example.
+2. Compile cpp part with `--build_benchmarks=ON`, then check `plan_validator_util` executable file in `gluten_home/cpp/build/velox/benchmarks/`.
+3. Run or debug with `./plan_validator_util <path>/plan.json`
+
+## 3 How to debug Java/Scala
 wait to add
 
-## 3 How to debug with core-dump
+## 4 How to debug with core-dump
 wait to complete
 ```
 cd the_directory_of_core_file_generated
@@ -154,3 +143,13 @@ Here will explain how to run TPC-H on Velox backend with the Parquet file format
 
 # How to run TPC-DS
 wait to add
+
+# How to track the memory exhaust problem
+When your gluten spark jobs failed because of OOM, you can track the memory allocation's call stack by configuring `spark.gluten.backtrace.allocation = true`.
+The above configuration will use `BacktraceAllocationListener` wrapping from `SparkAllocationListener` to create `VeloxMemoryManager`.
+
+`BacktraceAllocationListener` will check every allocation, if a single allocation bytes exceeds a fixed value or the accumulative allocation bytes exceeds 1/2/3...G,
+the call stack of memory allocation will be outputted to standard output, you can check the backtrace and get some valuable information about tracking the memory exhaust issues.
+
+You can also adjust the policy to decide when to backtrace, such as the fixed value.
+

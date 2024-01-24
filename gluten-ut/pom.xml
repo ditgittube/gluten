@@ -20,9 +20,13 @@
   <parent>
     <groupId>io.glutenproject</groupId>
     <artifactId>gluten-parent</artifactId>
-    <version>0.5.0-SNAPSHOT</version>
+    <version>1.2.0-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
+
+  <modules>
+    <module>common</module>
+  </modules>
 
   <artifactId>gluten-ut</artifactId>
   <packaging>pom</packaging>
@@ -54,7 +58,7 @@
     </dependency>
     <dependency>
       <groupId>org.apache.spark</groupId>
-      <artifactId>spark-hive-thriftserver_${scala.binary.version}</artifactId>
+      <artifactId>spark-hive_${scala.binary.version}</artifactId>
       <scope>provided</scope>
     </dependency>
     <dependency>
@@ -114,22 +118,18 @@
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
-      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-annotations</artifactId>
-      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-core</artifactId>
-      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>com.fasterxml.jackson.module</groupId>
       <artifactId>jackson-module-scala_${scala.binary.version}</artifactId>
-      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.scalatestplus</groupId>
@@ -168,29 +168,31 @@
           <groupId>org.scalastyle</groupId>
           <artifactId>scalastyle-maven-plugin</artifactId>
         </plugin>
+        <plugin>
+          <groupId>com.diffplug.spotless</groupId>
+          <artifactId>spotless-maven-plugin</artifactId>
+        </plugin>
       </plugins>
     </pluginManagement>
-
   </build>
 
   <profiles>
     <profile>
       <id>spark-3.2</id>
-      <activation>
-        <activeByDefault>true</activeByDefault>
-      </activation>
-      <properties>
-      </properties>
       <modules>
         <module>spark32</module>
-        <module>common</module>
       </modules>
     </profile>
     <profile>
       <id>spark-3.3</id>
       <modules>
         <module>spark33</module>
-        <module>common</module>
+      </modules>
+    </profile>
+    <profile>
+      <id>spark-3.4</id>
+      <modules>
+        <module>spark34</module>
       </modules>
     </profile>
   </profiles>

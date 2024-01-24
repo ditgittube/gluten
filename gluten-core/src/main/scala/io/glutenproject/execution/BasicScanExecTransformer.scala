@@ -14,41 +14,52 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.execution
 
-import com.google.common.collect.Lists
-import io.glutenproject.GlutenConfig
 import io.glutenproject.backendsapi.BackendsApiManager
 import io.glutenproject.expression.{ConverterUtils, ExpressionConverter}
 import io.glutenproject.extension.ValidationResult
-import io.glutenproject.substrait.SubstraitContext
 import io.glutenproject.substrait.`type`.ColumnTypeNode
+import io.glutenproject.substrait.SubstraitContext
 import io.glutenproject.substrait.plan.PlanBuilder
-import io.glutenproject.substrait.rel.RelBuilder
+import io.glutenproject.substrait.rel.{ReadRelNode, RelBuilder, SplitInfo}
+import io.glutenproject.substrait.rel.LocalFilesNode.ReadFileFormat
+
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.connector.read.InputPartition
-import org.apache.spark.sql.execution.InSubqueryExec
-import org.apache.spark.sql.types._
+import org.apache.spark.sql.types.BooleanType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-trait BasicScanExecTransformer extends TransformSupport {
+import com.google.common.collect.Lists
 
-  // The key of merge schema option in Parquet reader.
-  protected val mergeSchemaOptionKey = "mergeschema"
+import scala.collection.JavaConverters._
 
+trait BasicScanExecTransformer extends LeafTransformSupport with BaseDataSource {
+
+  /** Returns the filters that can be pushed down to native file scan */
   def filterExprs(): Seq[Expression]
 
   def outputAttributes(): Seq[Attribute]
 
-  def getPartitions: Seq[Seq[InputPartition]]
+  /** This can be used to report FileFormat for a file based scan operator. */
+  val fileFormat: ReadFileFormat
 
-  def getFlattenPartitions: Seq[InputPartition]
+  // TODO: Remove this expensive call when CH support scan custom partition location.
+  def getInputFilePaths: Seq[String] = {
+    // This is a heavy operation, and only the required backend executes the corresponding logic.
+    if (BackendsApiManager.getSettings.requiredInputFilePaths()) {
+      getInputFilePathsInternal
+    } else {
+      Seq.empty
+    }
+  }
 
-  def getPartitionSchemas: StructType
-
-  def getInputFilePaths: Seq[String]
+  /** Returns the split infos that will be processed by the underlying native engine. */
+  def getSplitInfos: Seq[SplitInfo] = {
+    getPartitions.map(
+      BackendsApiManager.getIteratorApiInstance
+        .genSplitInfo(_, getPartitionSchema, fileFormat))
+  }
 
   def doExecuteColumnarInternal(): RDD[ColumnarBatch] = {
     val numOutputRows = longMetric("outputRows")
@@ -56,22 +67,14 @@ trait BasicScanExecTransformer extends TransformSupport {
     val scanTime = longMetric("scanTime")
     val substraitContext = new SubstraitContext
     val transformContext = doTransform(substraitContext)
-    val outNames = new java.util.ArrayList[String]()
-    for (attr <- outputAttributes()) {
-      outNames.add(ConverterUtils.genColumnNameWithExprId(attr))
-    }
+    val outNames = outputAttributes().map(ConverterUtils.genColumnNameWithExprId).asJava
     val planNode =
       PlanBuilder.makePlan(substraitContext, Lists.newArrayList(transformContext.root), outNames)
-    val fileFormat = ConverterUtils.getFileFormat(this)
 
     BackendsApiManager.getIteratorApiInstance.genNativeFileScanRDD(
       sparkContext,
-      WholestageTransformContext(outputAttributes(),
-        outputAttributes(),
-        planNode,
-        substraitContext),
-      fileFormat,
-      getFlattenPartitions,
+      WholeStageTransformContext(planNode, substraitContext),
+      getSplitInfos,
       numOutputRows,
       numOutputVectors,
       scanTime
@@ -79,56 +82,54 @@ trait BasicScanExecTransformer extends TransformSupport {
   }
 
   override protected def doValidateInternal(): ValidationResult = {
-    val fileFormat = ConverterUtils.getFileFormat(this)
-    if (!BackendsApiManager.getTransformerApiInstance
-      .supportsReadFileFormat(
-        fileFormat, schema.fields, getPartitionSchemas.nonEmpty, getInputFilePaths)) {
-      return notOk(s"does not support fileFormat: $fileFormat")
+    val validationResult = BackendsApiManager.getSettings
+      .supportFileFormatRead(
+        fileFormat,
+        schema.fields,
+        getPartitionSchema.nonEmpty,
+        getInputFilePaths)
+    if (!validationResult.isValid) {
+      return validationResult
     }
 
     val substraitContext = new SubstraitContext
     val relNode = doTransform(substraitContext).root
-    if (GlutenConfig.getConf.enableNativeValidation) {
-      val planNode = PlanBuilder.makePlan(substraitContext, Lists.newArrayList(relNode))
-      val validateInfo = BackendsApiManager.getValidatorApiInstance
-        .doValidateWithFallBackLog(planNode)
-      nativeValidationResult(validateInfo)
-    } else {
-      ok()
-    }
+
+    doNativeValidation(substraitContext, relNode)
   }
 
   override def doTransform(context: SubstraitContext): TransformContext = {
     val output = outputAttributes()
     val typeNodes = ConverterUtils.collectAttributeTypeNodes(output)
     val nameList = ConverterUtils.collectAttributeNamesWithoutExprId(output)
-    val partitionSchemas = getPartitionSchemas
-    val columnTypeNodes = new java.util.ArrayList[ColumnTypeNode]()
-    for (attr <- output) {
-      if (partitionSchemas.exists(_.name.equals(attr.name))) {
-        columnTypeNodes.add(new ColumnTypeNode(1))
-      } else {
-        columnTypeNodes.add(new ColumnTypeNode(0))
-      }
-    }
+    val columnTypeNodes = output.map {
+      attr =>
+        if (getPartitionSchema.exists(_.name.equals(attr.name))) {
+          new ColumnTypeNode(1)
+        } else {
+          new ColumnTypeNode(0)
+        }
+    }.asJava
     // Will put all filter expressions into an AND expression
     val transformer = filterExprs()
+      .map {
+        case ar: AttributeReference if ar.dataType == BooleanType =>
+          EqualNullSafe(ar, Literal.TrueLiteral)
+        case e => e
+      }
       .reduceLeftOption(And)
       .map(ExpressionConverter.replaceWithExpressionTransformer(_, output))
     val filterNodes = transformer.map(_.doTransform(context.registeredFunction))
     val exprNode = filterNodes.orNull
 
-    val relNode = RelBuilder.makeReadRel(
+    val readNode = RelBuilder.makeReadRel(
       typeNodes,
       nameList,
       columnTypeNodes,
       exprNode,
       context,
       context.nextOperatorId(this.nodeName))
-    TransformContext(output, output, relNode)
-  }
-
-  def executeInSubqueryForDynamicPruningExpression(inSubquery: InSubqueryExec): Unit = {
-    if (!inSubquery.values().isDefined) inSubquery.updateResult()
+    readNode.asInstanceOf[ReadRelNode].setDataSchema(getDataSchema)
+    TransformContext(output, output, readNode)
   }
 }

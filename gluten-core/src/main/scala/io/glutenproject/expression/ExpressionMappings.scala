@@ -16,6 +16,7 @@
  */
 package io.glutenproject.expression
 
+import io.glutenproject.GlutenConfig
 import io.glutenproject.backendsapi.BackendsApiManager
 import io.glutenproject.expression.ExpressionNames._
 import io.glutenproject.extension.ExpressionExtensionTrait
@@ -29,7 +30,7 @@ import org.apache.spark.sql.execution.ScalarSubquery
 object ExpressionMappings {
 
   /** Mapping Spark scalar expression to Substrait function name */
-  private val SCALAR_SIGS: Seq[Sig] = Seq(
+  private lazy val SCALAR_SIGS: Seq[Sig] = Seq(
     Sig[Add](ADD),
     Sig[Asinh](ASINH),
     Sig[Acosh](ACOSH),
@@ -37,6 +38,8 @@ object ExpressionMappings {
     Sig[Subtract](SUBTRACT),
     Sig[Multiply](MULTIPLY),
     Sig[Divide](DIVIDE),
+    Sig[UnaryPositive](POSITIVE),
+    Sig[UnaryMinus](NEGATIVE),
     Sig[And](AND),
     Sig[Or](OR),
     Sig[Cast](CAST),
@@ -60,6 +63,7 @@ object ExpressionMappings {
     // SparkSQL String functions
     Sig[Ascii](ASCII),
     Sig[Chr](CHR),
+    Sig[Elt](ELT),
     Sig[Extract](EXTRACT),
     Sig[EndsWith](ENDS_WITH),
     Sig[StartsWith](STARTS_WITH),
@@ -79,10 +83,23 @@ object ExpressionMappings {
     Sig[Reverse](REVERSE),
     Sig[StringSplit](SPLIT),
     Sig[Substring](SUBSTRING),
+    Sig[SubstringIndex](SUBSTRING_INDEX),
     Sig[ConcatWs](CONCAT_WS),
+    Sig[Left](LEFT),
     Sig[StringRepeat](REPEAT),
     Sig[StringTranslate](TRANSLATE),
     Sig[StringSpace](SPACE),
+    Sig[InitCap](INITCAP),
+    Sig[Overlay](OVERLAY),
+    Sig[Conv](CONV),
+    Sig[FindInSet](FIND_IN_SET),
+    Sig[StringDecode](DECODE),
+    Sig[Encode](ENCODE),
+    Sig[Uuid](UUID),
+
+    // URL functions
+    Sig[ParseUrl](PARSE_URL),
+
     // SparkSQL Math functions
     Sig[Abs](ABS),
     Sig[Bin](BIN),
@@ -101,8 +118,11 @@ object ExpressionMappings {
     Sig[BitwiseAnd](BITWISE_AND),
     Sig[BitwiseOr](BITWISE_OR),
     Sig[BitwiseXor](BITWISE_XOR),
+    Sig[BitwiseGet](BITWISE_GET),
+    Sig[BitwiseCount](BITWISE_COUNT),
     Sig[ShiftLeft](SHIFTLEFT),
     Sig[ShiftRight](SHIFTRIGHT),
+    Sig[ShiftRightUnsigned](SHIFTRIGHTUNSIGNED),
     Sig[Sqrt](SQRT),
     Sig[Cbrt](CBRT),
     Sig[EulerNumber](E),
@@ -153,6 +173,9 @@ object ExpressionMappings {
     Sig[TruncDate](TRUNC),
     Sig[TruncTimestamp](DATE_TRUNC),
     Sig[GetTimestamp](GET_TIMESTAMP),
+    Sig[NextDay](NEXT_DAY),
+    Sig[LastDay](LAST_DAY),
+    Sig[MonthsBetween](MONTHS_BETWEEN),
     // JSON functions
     Sig[GetJsonObject](GET_JSON_OBJECT),
     Sig[LengthOfJsonArray](JSON_ARRAY_LENGTH),
@@ -168,25 +191,33 @@ object ExpressionMappings {
     Sig[Crc32](CRC32),
     // Array functions
     Sig[Size](SIZE),
+    Sig[Slice](SLICE),
+    Sig[Sequence](SEQUENCE),
     Sig[CreateArray](CREATE_ARRAY),
     Sig[Explode](EXPLODE),
+    Sig[ArrayAggregate](AGGREGATE),
+    Sig[LambdaFunction](LAMBDAFUNCTION),
+    Sig[NamedLambdaVariable](NAMED_LAMBDA_VARIABLE),
     Sig[PosExplode](POSEXPLODE),
     Sig[GetArrayItem](GET_ARRAY_ITEM),
     Sig[ElementAt](ELEMENT_AT),
     Sig[ArrayContains](ARRAY_CONTAINS),
     Sig[ArrayMax](ARRAY_MAX),
     Sig[ArrayMin](ARRAY_MIN),
-    Sig[Sequence](SEQUENCE),
+    Sig[ArrayJoin](ARRAY_JOIN),
     Sig[SortArray](SORT_ARRAY),
     Sig[ArraysOverlap](ARRAYS_OVERLAP),
-    Sig[Slice](SLICE),
-
+    Sig[ArrayPosition](ARRAY_POSITION),
+    Sig[ArrayDistinct](ARRAY_DISTINCT),
+    Sig[ArrayUnion](ARRAY_UNION),
+    Sig[ArrayIntersect](ARRAY_INTERSECT),
     // Map functions
     Sig[CreateMap](CREATE_MAP),
     Sig[GetMapValue](GET_MAP_VALUE),
     Sig[MapKeys](MAP_KEYS),
     Sig[MapValues](MAP_VALUES),
     Sig[MapFromArrays](MAP_FROM_ARRAYS),
+    Sig[StringToMap](STR_TO_MAP),
     // Struct functions
     Sig[GetStructField](GET_STRUCT_FIELD),
     Sig[CreateNamedStruct](NAMED_STRUCT),
@@ -216,6 +247,8 @@ object ExpressionMappings {
     Sig[Count](COUNT),
     Sig[Min](MIN),
     Sig[Max](MAX),
+    Sig[MaxBy](MAX_BY),
+    Sig[MinBy](MIN_BY),
     Sig[StddevSamp](STDDEV_SAMP),
     Sig[StddevPop](STDDEV_POP),
     Sig[CollectList](COLLECT_LIST),
@@ -245,9 +278,16 @@ object ExpressionMappings {
     Sig[NthValue](NTH_VALUE)
   )
 
-  def expressionsMap: Map[Class[_], String] =
-    defaultExpressionsMap ++
+  def expressionsMap: Map[Class[_], String] = {
+    val blacklist = GlutenConfig.getConf.expressionBlacklist
+    val supportedExprs = defaultExpressionsMap ++
       expressionExtensionTransformer.extensionExpressionsMapping
+    if (blacklist.isEmpty) {
+      supportedExprs
+    } else {
+      supportedExprs.filterNot(kv => blacklist.contains(kv._2))
+    }
+  }
 
   private lazy val defaultExpressionsMap: Map[Class[_], String] = {
     (SCALAR_SIGS ++ AGGREGATE_SIGS ++ WINDOW_SIGS ++

@@ -227,18 +227,26 @@ case class ClickHouseAppendDataExec(
         val paths = new java.util.ArrayList[String]()
         val starts = new java.util.ArrayList[java.lang.Long]()
         val lengths = new java.util.ArrayList[java.lang.Long]()
+        val partitionColumns = mutable.ArrayBuffer.empty[Map[String, String]]
         paths.add(files.head.filePath)
         starts.add(files.head.start)
         lengths.add(files.head.length)
         val localFilesNode =
           LocalFilesBuilder
-            .makeLocalFiles(index, paths, starts, lengths, ReadFileFormat.UnknownFormat)
+            .makeLocalFiles(
+              index,
+              paths,
+              starts,
+              lengths,
+              partitionColumns.map(_.asJava).asJava,
+              ReadFileFormat.UnknownFormat,
+              List.empty.asJava)
         val insertOutputNode = InsertOutputBuilder.makeInsertOutputNode(
           SnowflakeIdWorker.getInstance().nextId(),
           database,
           tableName,
           tablePath)
-        dllCxt.substraitContext.setLocalFilesNodes(Seq(localFilesNode))
+        dllCxt.substraitContext.setSplitInfos(Seq(localFilesNode))
         dllCxt.substraitContext.setInsertOutputNode(insertOutputNode)
         val substraitPlan = dllCxt.root.toProtobuf
         logWarning(dllCxt.root.toProtobuf.toString)

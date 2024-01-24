@@ -45,8 +45,10 @@ class GlutenClickHouseTPCDSParquetSuite extends GlutenClickHouseTPCDSAbstractSui
       //      .set("spark.sql.files.maxPartitionBytes", "134217728")
       //      .set("spark.sql.files.openCostInBytes", "134217728")
       .set("spark.memory.offHeap.size", "4g")
-      .set("spark.gluten.sql.validate.failure.logLevel", "ERROR")
-      .set("spark.gluten.sql.validate.failure.printStack", "true")
+      .set("spark.gluten.sql.validation.logLevel", "ERROR")
+      .set("spark.gluten.sql.validation.printStackOnFailure", "true")
+//      .set("spark.gluten.sql.columnar.backend.ch.runtime_config.logger.level", "debug")
+//      .setMaster("local[1]")
   }
 
   executeTPCDSTest(false)
@@ -74,7 +76,7 @@ class GlutenClickHouseTPCDSParquetSuite extends GlutenClickHouseTPCDSAbstractSui
                           |  where ss_quantity between 1 and 20
                           |  and ss_sold_date_sk = 2452635
                           |""".stripMargin) { _ => }
-    assert(result(0).getDouble(0) == 379.21313271604936)
+    AlmostEqualsIsRel(379.21313271604936, result.head.getDouble(0), DBL_RELAX_EPSILON)
   }
 
   test("test select avg(int), avg(long)") {
@@ -172,7 +174,7 @@ class GlutenClickHouseTPCDSParquetSuite extends GlutenClickHouseTPCDSAbstractSui
         |""".stripMargin
 
     val df = spark.sql(testSql)
-    assert(FallbackUtil.isFallback(df.queryExecution.executedPlan))
+    assert(FallbackUtil.hasFallback(df.queryExecution.executedPlan))
   }
 
   test(
@@ -342,5 +344,62 @@ class GlutenClickHouseTPCDSParquetSuite extends GlutenClickHouseTPCDSAbstractSui
         |""".stripMargin
     compareResultsAgainstVanillaSpark(sql, true, _ => {})
   }
+
+  test("GLUTEN-1626: test 'roundHalfup'") {
+    val sql0 =
+      """
+        |select cast(ss_wholesale_cost as Int) a, round(sum(ss_wholesale_cost),2),
+        |round(sum(ss_wholesale_cost+0.06),2), round(sum(ss_wholesale_cost-0.04),2)
+        |from store_sales
+        |group by a order by a
+        |""".stripMargin
+    compareResultsAgainstVanillaSpark(sql0, true, _ => {})
+
+    val sql1 =
+      """
+        |select cast(ss_sales_price as Int) a, round(sum(ss_sales_price),2),
+        |round(sum(ss_sales_price+0.06),2), round(sum(ss_sales_price-0.04),2)
+        |from store_sales
+        |group by a order by a
+        |""".stripMargin
+    compareResultsAgainstVanillaSpark(sql1, true, _ => {})
+
+    val sql2 =
+      """
+        |select cast(cs_wholesale_cost as Int) a, round(sum(cs_wholesale_cost),2),
+        |round(sum(cs_wholesale_cost+0.06),2), round(sum(cs_wholesale_cost-0.04),2)
+        |from catalog_sales
+        |group by a order by a
+        |""".stripMargin
+    compareResultsAgainstVanillaSpark(sql2, true, _ => {})
+
+    val sql3 =
+      """
+        |select cast(cs_sales_price as Int) a, round(sum(cs_sales_price),2),
+        |round(sum(cs_sales_price+0.06),2), round(sum(cs_sales_price-0.04),2)
+        |from catalog_sales
+        |group by a order by a
+        |""".stripMargin
+    compareResultsAgainstVanillaSpark(sql3, true, _ => {})
+
+    val sql4 =
+      """
+        |select cast(ws_wholesale_cost as Int) a, round(sum(ws_wholesale_cost),2),
+        |round(sum(ws_wholesale_cost+0.06),2), round(sum(ws_wholesale_cost-0.04),2)
+        |from web_sales
+        |group by a order by a
+        |""".stripMargin
+    compareResultsAgainstVanillaSpark(sql4, true, _ => {})
+
+    val sql5 =
+      """
+        |select cast(ws_sales_price as Int) a, round(sum(ws_sales_price),2),
+        |round(sum(ws_sales_price+0.06),2), round(sum(ws_sales_price-0.04),2)
+        |from web_sales
+        |group by a order by a
+        |""".stripMargin
+    compareResultsAgainstVanillaSpark(sql5, true, _ => {})
+  }
+
 }
 // scalastyle:on line.size.limit

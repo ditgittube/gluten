@@ -14,60 +14,65 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.vectorized;
 
-import io.glutenproject.validate.NativePlanValidatorInfo;
-import io.glutenproject.init.JniInitialized;
+import io.glutenproject.exec.Runtime;
+import io.glutenproject.exec.RuntimeAware;
+import io.glutenproject.exec.Runtimes;
+import io.glutenproject.validate.NativePlanValidationInfo;
 
 /**
- * This class is implemented in JNI. This provides the Java interface to invoke
- * functions in JNI. This file is used to generate the .h files required for
- * jni. Avoid all external dependencies in this file.
+ * This class is implemented in JNI. This provides the Java interface to invoke functions in JNI.
+ * This file is used to generate the .h files required for jni. Avoid all external dependencies in
+ * this file.
  */
-public class PlanEvaluatorJniWrapper extends JniInitialized {
+public class PlanEvaluatorJniWrapper implements RuntimeAware {
+  private final Runtime runtime;
 
-  /**
-   * Wrapper for native API.
-   */
-  public PlanEvaluatorJniWrapper() {
+  private PlanEvaluatorJniWrapper(Runtime runtime) {
+    this.runtime = runtime;
+  }
+
+  public static PlanEvaluatorJniWrapper create() {
+    return new PlanEvaluatorJniWrapper(Runtimes.contextInstance());
+  }
+
+  public static PlanEvaluatorJniWrapper forRuntime(Runtime runtime) {
+    return new PlanEvaluatorJniWrapper(runtime);
+  }
+
+  @Override
+  public long handle() {
+    return runtime.getHandle();
   }
 
   /**
    * Validate the Substrait plan in native compute engine.
    *
    * @param subPlan the Substrait plan in binary format.
-   * @return whether the computing of this plan is supported in native.
+   * @return whether the computing of this plan is supported in native and related info.
    */
-  native boolean nativeDoValidate(byte[] subPlan);
+  native NativePlanValidationInfo nativeValidateWithFailureReason(byte[] subPlan);
 
-  native NativePlanValidatorInfo nativeDoValidateWithFallBackLog(byte[] subPlan);
+  public native String nativePlanString(byte[] substraitPlan, Boolean details);
+
+  public native void injectWriteFilesTempPath(byte[] path);
+
   /**
    * Create a native compute kernel and return a columnar result iterator.
    *
-   * @param allocatorId allocator id
+   * @param memoryManagerHandle NativeMemoryManager instance handle
    * @return iterator instance id
    */
   public native long nativeCreateKernelWithIterator(
-      long allocatorId,
+      long memoryManagerHandle,
       byte[] wsPlan,
+      byte[][] splitInfo,
       GeneralInIterator[] batchItr,
       int stageId,
       int partitionId,
       long taskId,
       boolean saveInputToFile,
-      String localDir,
-      byte[] confPlan) throws RuntimeException;
-
-  /**
-   * Create a native compute kernel and return a row iterator.
-   */
-  native long nativeCreateKernelWithRowIterator(byte[] wsPlan) throws RuntimeException;
-
-  /**
-   * Closes the projector referenced by nativeHandler.
-   *
-   * @param nativeHandler nativeHandler that needs to be closed
-   */
-  native void nativeClose(long nativeHandler);
+      String spillDir)
+      throws RuntimeException;
 }

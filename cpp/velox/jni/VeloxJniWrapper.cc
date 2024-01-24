@@ -16,102 +16,92 @@
  */
 
 #include <jni.h>
-#include "arrow/c/bridge.h"
 
 #include <glog/logging.h>
 #include <jni/JniCommon.h>
+
 #include <exception>
+#include "JniUdf.h"
 #include "compute/VeloxBackend.h"
-#include "compute/VeloxInitializer.h"
-#include "compute/VeloxParquetDatasource.h"
 #include "config/GlutenConfig.h"
-#include "jni/JniErrors.h"
-#include "memory/VeloxMemoryPool.h"
-#include "velox/substrait/SubstraitToVeloxPlanValidator.h"
+#include "jni/JniError.h"
+#include "jni/JniFileSystem.h"
+#include "memory/VeloxMemoryManager.h"
+#include "substrait/SubstraitToVeloxPlanValidator.h"
+#include "utils/ConfigExtractor.h"
 
 #include <iostream>
 
 using namespace facebook;
 
-namespace {
-
-std::shared_ptr<gluten::Backend> VeloxBackendFactory(const std::unordered_map<std::string, std::string>& sparkConfs) {
-  return std::make_shared<gluten::VeloxBackend>(sparkConfs);
-}
-
-} // namespace
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-jint JNI_OnLoad(JavaVM* vm, void* reserved) {
+jint JNI_OnLoad(JavaVM* vm, void*) {
   JNIEnv* env;
   if (vm->GetEnv(reinterpret_cast<void**>(&env), jniVersion) != JNI_OK) {
     return JNI_ERR;
   }
 
-  // logging
-  google::InitGoogleLogging("gluten");
-  FLAGS_logtostderr = true;
-  gluten::getJniErrorsState()->initialize(env);
-#ifdef GLUTEN_PRINT_DEBUG
-  std::cout << "Loaded Velox backend." << std::endl;
-#endif
+  gluten::getJniCommonState()->ensureInitialized(env);
+  gluten::getJniErrorState()->ensureInitialized(env);
+  gluten::initVeloxJniFileSystem(env);
+  gluten::initVeloxJniUDF(env);
+
+  DLOG(INFO) << "Loaded Velox backend.";
+
   return jniVersion;
 }
 
-void JNI_OnUnload(JavaVM* vm, void* reserved) {
+void JNI_OnUnload(JavaVM* vm, void*) {
   JNIEnv* env;
   vm->GetEnv(reinterpret_cast<void**>(&env), jniVersion);
+  gluten::finalizeVeloxJniUDF(env);
+  gluten::finalizeVeloxJniFileSystem(env);
+  gluten::getJniErrorState()->close();
+  gluten::getJniCommonState()->close();
   google::ShutdownGoogleLogging();
 }
 
-JNIEXPORT void JNICALL Java_io_glutenproject_init_InitializerJniWrapper_initialize( // NOLINT
+JNIEXPORT void JNICALL Java_io_glutenproject_init_NativeBackendInitializer_initialize( // NOLINT
     JNIEnv* env,
-    jclass clazz,
-    jbyteArray planArray) {
+    jclass,
+    jbyteArray conf) {
   JNI_METHOD_START
-  auto sparkConfs = gluten::getConfMap(env, planArray);
-  gluten::setBackendFactory(VeloxBackendFactory, sparkConfs);
-  gluten::VeloxInitializer::create(sparkConfs);
+  auto sparkConf = gluten::parseConfMap(env, conf);
+  gluten::VeloxBackend::create(sparkConf);
   JNI_METHOD_END()
 }
 
-JNIEXPORT jboolean JNICALL Java_io_glutenproject_vectorized_PlanEvaluatorJniWrapper_nativeDoValidate( // NOLINT
+JNIEXPORT void JNICALL Java_io_glutenproject_udf_UdfJniWrapper_nativeLoadUdfLibraries( // NOLINT
     JNIEnv* env,
-    jobject obj,
-    jbyteArray planArray) {
+    jclass,
+    jstring libPaths) {
   JNI_METHOD_START
-  auto planData = reinterpret_cast<const uint8_t*>(env->GetByteArrayElements(planArray, 0));
-  auto planSize = env->GetArrayLength(planArray);
-  ::substrait::Plan subPlan;
-  gluten::parseProtobuf(planData, planSize, &subPlan);
-
-  // A query context used for function validation.
-  velox::core::QueryCtx queryCtx;
-  auto pool = gluten::defaultLeafVeloxMemoryPool().get();
-  // An execution context used for function validation.
-  velox::core::ExecCtx execCtx(pool, &queryCtx);
-
-  velox::substrait::SubstraitToVeloxPlanValidator planValidator(pool, &execCtx);
-  try {
-    return planValidator.validate(subPlan);
-  } catch (std::invalid_argument& e) {
-    LOG(INFO) << "Failed to validate substrait plan because " << e.what();
-    return false;
-  }
-  JNI_METHOD_END(false)
+  gluten::jniLoadUdf(env, jStringToCString(env, libPaths));
+  JNI_METHOD_END()
 }
 
 JNIEXPORT jobject JNICALL
-Java_io_glutenproject_vectorized_PlanEvaluatorJniWrapper_nativeDoValidateWithFallBackLog( // NOLINT
+Java_io_glutenproject_vectorized_PlanEvaluatorJniWrapper_nativeValidateWithFailureReason( // NOLINT
     JNIEnv* env,
-    jobject obj,
+    jobject wrapper,
     jbyteArray planArray) {
   JNI_METHOD_START
+  auto ctx = gluten::getRuntime(env, wrapper);
   auto planData = reinterpret_cast<const uint8_t*>(env->GetByteArrayElements(planArray, 0));
   auto planSize = env->GetArrayLength(planArray);
+  if (gluten::debugModeEnabled(ctx->getConfMap())) {
+    try {
+      auto jsonPlan = gluten::substraitFromPbToJson("Plan", planData, planSize);
+      LOG(INFO) << std::string(50, '#') << " received substrait::Plan: for validation";
+      LOG(INFO) << jsonPlan;
+    } catch (const std::exception& e) {
+      LOG(WARNING) << "Error converting Substrait plan for validation to JSON: " << e.what();
+    }
+  }
+
   ::substrait::Plan subPlan;
   gluten::parseProtobuf(planData, planSize, &subPlan);
 
@@ -121,10 +111,10 @@ Java_io_glutenproject_vectorized_PlanEvaluatorJniWrapper_nativeDoValidateWithFal
   // An execution context used for function validation.
   velox::core::ExecCtx execCtx(pool, &queryCtx);
 
-  velox::substrait::SubstraitToVeloxPlanValidator planValidator(pool, &execCtx);
-  jclass infoCls = env->FindClass("Lio/glutenproject/validate/NativePlanValidatorInfo;");
+  gluten::SubstraitToVeloxPlanValidator planValidator(pool, &execCtx);
+  jclass infoCls = env->FindClass("Lio/glutenproject/validate/NativePlanValidationInfo;");
   if (infoCls == nullptr) {
-    std::string errorMessage = "Unable to CreateGlobalClassReferenceOrError for NativePlanValidatorInfo";
+    std::string errorMessage = "Unable to CreateGlobalClassReferenceOrError for NativePlanValidationInfo";
     throw gluten::GlutenException(errorMessage);
   }
   jmethodID method = env->GetMethodID(infoCls, "<init>", "(ILjava/lang/String;)V");

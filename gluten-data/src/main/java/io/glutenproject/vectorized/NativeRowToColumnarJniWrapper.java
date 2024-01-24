@@ -14,16 +14,32 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.vectorized;
 
-import io.glutenproject.init.JniInitialized;
+import io.glutenproject.exec.Runtime;
+import io.glutenproject.exec.RuntimeAware;
+import io.glutenproject.exec.Runtimes;
 
-public class NativeRowToColumnarJniWrapper extends JniInitialized {
-    public NativeRowToColumnarJniWrapper() {}
+public class NativeRowToColumnarJniWrapper implements RuntimeAware {
+  private final Runtime runtime;
 
-    public native long init(long cSchema, long allocId);
-    public native long nativeConvertRowToColumnar(long r2CId, long[] rowLength, long bufferAddress);
+  private NativeRowToColumnarJniWrapper(Runtime runtime) {
+    this.runtime = runtime;
+  }
 
-    public native void close(long r2cId);
+  public static NativeRowToColumnarJniWrapper create() {
+    return new NativeRowToColumnarJniWrapper(Runtimes.contextInstance());
+  }
+
+  @Override
+  public long handle() {
+    return runtime.getHandle();
+  }
+
+  public native long init(long cSchema, long memoryManagerHandle);
+
+  public native long nativeConvertRowToColumnar(
+      long r2cHandle, long[] rowLength, long bufferAddress);
+
+  public native void close(long r2cHandle);
 }

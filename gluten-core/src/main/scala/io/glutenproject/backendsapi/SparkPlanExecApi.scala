@@ -25,8 +25,11 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.serializer.Serializer
 import org.apache.spark.shuffle.{GenShuffleWriterParameters, GlutenShuffleWriterWrapper}
 import org.apache.spark.sql.{SparkSession, Strategy}
+import org.apache.spark.sql.catalyst.FunctionIdentifier
+import org.apache.spark.sql.catalyst.analysis.FunctionRegistry.FunctionBuilder
+import org.apache.spark.sql.catalyst.catalog.BucketSpec
+import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.catalyst.expressions.{Attribute, Cast, CreateNamedStruct, Expression, GetStructField, NamedExpression, Sha1, Sha2, Size}
 import org.apache.spark.sql.catalyst.expressions.aggregate.AggregateExpression
 import org.apache.spark.sql.catalyst.optimizer.BuildSide
 import org.apache.spark.sql.catalyst.plans.JoinType
@@ -34,13 +37,17 @@ import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.plans.physical.{BroadcastMode, Partitioning}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.datasources.{FileFormat, WriteFilesExec}
 import org.apache.spark.sql.execution.joins.BuildSideRelation
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.hive.HiveTableScanExecTransformer
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-import java.util
+import java.lang.{Long => JLong}
+import java.util.{ArrayList => JArrayList, List => JList, Map => JMap}
+
+import scala.collection.JavaConverters._
 
 trait SparkPlanExecApi {
 
@@ -66,7 +73,7 @@ trait SparkPlanExecApi {
    * @param condition
    *   : the filter condition
    * @param child
-   *   : the chid of FilterExec
+   *   : the child of FilterExec
    * @return
    *   the transformer of FilterExec
    */
@@ -107,23 +114,67 @@ trait SparkPlanExecApi {
       right: SparkPlan,
       isNullAwareAntiJoin: Boolean = false): BroadcastHashJoinExecTransformer
 
-  /**
-   * Generate Alias transformer.
-   *
-   * @param child
-   *   The computation being performed
-   * @param name
-   *   The name to be associated with the result of computing.
-   * @param exprId
-   * @param qualifier
-   * @param explicitMetadata
-   * @return
-   *   a transformer for alias
-   */
   def genAliasTransformer(
       substraitExprName: String,
       child: ExpressionTransformer,
-      original: Expression): AliasTransformerBase
+      original: Expression): ExpressionTransformer =
+    AliasTransformer(substraitExprName, child, original)
+
+  /** Generate SplitTransformer. */
+  def genStringSplitTransformer(
+      substraitExprName: String,
+      srcExpr: ExpressionTransformer,
+      regexExpr: ExpressionTransformer,
+      limitExpr: ExpressionTransformer,
+      original: StringSplit): ExpressionTransformer = {
+    GenericExpressionTransformer(substraitExprName, Seq(srcExpr, regexExpr, limitExpr), original)
+  }
+
+  def genRandTransformer(
+      substraitExprName: String,
+      explicitSeed: ExpressionTransformer,
+      original: Rand): ExpressionTransformer = {
+    RandTransformer(substraitExprName, explicitSeed, original)
+  }
+
+  /** Generate an expression transformer to transform GetMapValue to Substrait. */
+  def genGetMapValueTransformer(
+      substraitExprName: String,
+      left: ExpressionTransformer,
+      right: ExpressionTransformer,
+      original: GetMapValue): ExpressionTransformer
+
+  def genStringToMapTransformer(
+      substraitExprName: String,
+      children: Seq[ExpressionTransformer],
+      expr: Expression): ExpressionTransformer = {
+    GenericExpressionTransformer(substraitExprName, children, expr)
+  }
+
+  /** Transform GetArrayItem to Substrait. */
+  def genGetArrayItemExpressionNode(
+      substraitExprName: String,
+      functionMap: JMap[String, JLong],
+      leftNode: ExpressionNode,
+      rightNode: ExpressionNode,
+      original: GetArrayItem): ExpressionNode
+
+  def genPosExplodeTransformer(
+      substraitExprName: String,
+      child: ExpressionTransformer,
+      original: PosExplode,
+      attributeSeq: Seq[Attribute]): ExpressionTransformer = {
+    PosExplodeTransformer(substraitExprName, child, original, attributeSeq)
+  }
+
+  /** Transform NaNvl to Substrait. */
+  def genNaNvlTransformer(
+      substraitExprName: String,
+      left: ExpressionTransformer,
+      right: ExpressionTransformer,
+      original: NaNvl): ExpressionTransformer = {
+    throw new UnsupportedOperationException("NaNvl is not supported")
+  }
 
   /**
    * Generate ShuffleDependency for ColumnarShuffleExchangeExec.
@@ -155,9 +206,7 @@ trait SparkPlanExecApi {
    *
    * @return
    */
-  def createColumnarBatchSerializer(
-      schema: StructType,
-      metrics: Map[String, SQLMetric]): Serializer
+  def createColumnarBatchSerializer(schema: StructType, metrics: Map[String, SQLMetric]): Serializer
 
   /** Create broadcast relation for BroadcastExchangeExec */
   def createBroadcastRelation(
@@ -165,6 +214,15 @@ trait SparkPlanExecApi {
       child: SparkPlan,
       numOutputRows: SQLMetric,
       dataSize: SQLMetric): BuildSideRelation
+
+  /** Create ColumnarWriteFilesExec */
+  def createColumnarWriteFilesExec(
+      child: SparkPlan,
+      fileFormat: FileFormat,
+      partitionColumns: Seq[Attribute],
+      bucketSpec: Option[BucketSpec],
+      options: Map[String, String],
+      staticPartitions: TablePartitionSpec): WriteFilesExec
 
   /**
    * Generate extended DataSourceV2 Strategies. Currently only for ClickHouse backend.
@@ -180,7 +238,7 @@ trait SparkPlanExecApi {
    */
   def genExtendedAnalyzers(): List[SparkSession => Rule[LogicalPlan]]
 
-    /**
+  /**
    * Generate extended Optimizers. Currently only for Velox backend.
    *
    * @return
@@ -188,7 +246,7 @@ trait SparkPlanExecApi {
   def genExtendedOptimizers(): List[SparkSession => Rule[LogicalPlan]]
 
   /**
-   * Generate extended Strategies. Currently only for Velox backend.
+   * Generate extended Strategies
    *
    * @return
    */
@@ -208,30 +266,56 @@ trait SparkPlanExecApi {
    */
   def genExtendedColumnarPostRules(): List[SparkSession => Rule[SparkPlan]]
 
-  /**
-   * Generate an ExpressionTransformer to transform GetStructFiled expression.
-   */
   def genGetStructFieldTransformer(
       substraitExprName: String,
       childTransformer: ExpressionTransformer,
       ordinal: Int,
       original: GetStructField): ExpressionTransformer = {
-    new GetStructFieldTransformerBase(substraitExprName, childTransformer, ordinal, original)
+    GetStructFieldTransformer(substraitExprName, childTransformer, ordinal, original)
   }
 
-  /** Generate an expression transformer to transform NamedStruct to Substrait. */
   def genNamedStructTransformer(
       substraitExprName: String,
+      children: Seq[ExpressionTransformer],
       original: CreateNamedStruct,
-      attributeSeq: Seq[Attribute]): ExpressionTransformer =
-    new NamedStructTransformerBase(substraitExprName, original, attributeSeq)
+      attributeSeq: Seq[Attribute]): ExpressionTransformer = {
+    GenericExpressionTransformer(substraitExprName, children, original)
+  }
 
   def genEqualNullSafeTransformer(
       substraitExprName: String,
       left: ExpressionTransformer,
       right: ExpressionTransformer,
       original: EqualNullSafe): ExpressionTransformer = {
-    new BinaryExpressionTransformer(substraitExprName, left, right, original)
+    GenericExpressionTransformer(substraitExprName, Seq(left, right), original)
+  }
+
+  def genMd5Transformer(
+      substraitExprName: String,
+      child: ExpressionTransformer,
+      original: Md5): ExpressionTransformer = {
+    GenericExpressionTransformer(substraitExprName, Seq(child), original)
+  }
+
+  def genStringTranslateTransformer(
+      substraitExprName: String,
+      srcExpr: ExpressionTransformer,
+      matchingExpr: ExpressionTransformer,
+      replaceExpr: ExpressionTransformer,
+      original: StringTranslate): ExpressionTransformer = {
+    GenericExpressionTransformer(
+      substraitExprName,
+      Seq(srcExpr, matchingExpr, replaceExpr),
+      original)
+  }
+
+  def genStringLocateTransformer(
+      substraitExprName: String,
+      first: ExpressionTransformer,
+      second: ExpressionTransformer,
+      third: ExpressionTransformer,
+      original: StringLocate): ExpressionTransformer = {
+    GenericExpressionTransformer(substraitExprName, Seq(first, second, third), original)
   }
 
   /**
@@ -243,7 +327,7 @@ trait SparkPlanExecApi {
       left: ExpressionTransformer,
       right: ExpressionTransformer,
       original: Sha2): ExpressionTransformer = {
-    new Sha2Transformer(substraitExprName, left, right, original)
+    GenericExpressionTransformer(substraitExprName, Seq(left, right), original)
   }
 
   /**
@@ -254,14 +338,14 @@ trait SparkPlanExecApi {
       substraitExprName: String,
       child: ExpressionTransformer,
       original: Sha1): ExpressionTransformer = {
-    new Sha1Transformer(substraitExprName, child, original)
+    GenericExpressionTransformer(substraitExprName, Seq(child), original)
   }
 
   def genSizeExpressionTransformer(
       substraitExprName: String,
       child: ExpressionTransformer,
       original: Size): ExpressionTransformer = {
-    new UnaryExpressionTransformer(substraitExprName, child, original)
+    GenericExpressionTransformer(substraitExprName, Seq(child), original)
   }
 
   /**
@@ -269,120 +353,142 @@ trait SparkPlanExecApi {
    * TruncTimestampTransformer is the default implementation.
    */
   def genTruncTimestampTransformer(
-    substraitExprName: String,
-    format: ExpressionTransformer,
-    timestamp: ExpressionTransformer,
-    timeZoneId: Option[String] = None,
-    original: TruncTimestamp): ExpressionTransformer = {
-    new TruncTimestampTransformer(substraitExprName, format, timestamp, timeZoneId, original)
+      substraitExprName: String,
+      format: ExpressionTransformer,
+      timestamp: ExpressionTransformer,
+      timeZoneId: Option[String] = None,
+      original: TruncTimestamp): ExpressionTransformer = {
+    TruncTimestampTransformer(substraitExprName, format, timestamp, timeZoneId, original)
   }
 
-  def genCastWithNewChild(c: Cast): Cast = {
-    c
-  }
+  def genCastWithNewChild(c: Cast): Cast = c
 
   def genHashExpressionTransformer(
       substraitExprName: String,
-      exps: Seq[ExpressionTransformer],
+      exprs: Seq[ExpressionTransformer],
       original: Expression): ExpressionTransformer = {
-    new HashExpressionTransformerBase(substraitExprName, exps, original)
+    HashExpressionTransformer(substraitExprName, exprs, original)
   }
 
-  /**
-   * Define backend specfic expression mappings.
-   */
+  def genUnixTimestampTransformer(
+      substraitExprName: String,
+      timeExp: ExpressionTransformer,
+      format: ExpressionTransformer,
+      original: ToUnixTimestamp): ExpressionTransformer = {
+    ToUnixTimestampTransformer(
+      substraitExprName,
+      timeExp,
+      format,
+      original.timeZoneId,
+      original.failOnError,
+      original)
+  }
+
+  /** Define backend specfic expression mappings. */
   def extraExpressionMappings: Seq[Sig] = Seq.empty
 
   /**
-   * Define whether the join operator is fallback because of
-   * the join operator is not supported by backend
+   * Define whether the join operator is fallback because of the join operator is not supported by
+   * backend
    */
-  def joinFallback(JoinType: JoinType,
-                   leftOutputSet: AttributeSet,
-                   right: AttributeSet,
-                   condition: Option[Expression]): Boolean = false
+  def joinFallback(
+      JoinType: JoinType,
+      leftOutputSet: AttributeSet,
+      right: AttributeSet,
+      condition: Option[Expression]): Boolean = false
 
-  /**
-   * default function to generate window function node
-   */
+  /** default function to generate window function node */
   def genWindowFunctionsNode(
-    windowExpression: Seq[NamedExpression],
-    windowExpressionNodes: util.ArrayList[WindowFunctionNode],
-    originalInputAttributes: Seq[Attribute],
-    args: util.HashMap[String, java.lang.Long]): Unit = {
+      windowExpression: Seq[NamedExpression],
+      windowExpressionNodes: JList[WindowFunctionNode],
+      originalInputAttributes: Seq[Attribute],
+      args: JMap[String, JLong]): Unit = {
 
-    windowExpression.map { windowExpr =>
-      val aliasExpr = windowExpr.asInstanceOf[Alias]
-      val columnName = s"${aliasExpr.name}_${aliasExpr.exprId.id}"
-      val wExpression = aliasExpr.child.asInstanceOf[WindowExpression]
-      wExpression.windowFunction match {
-        case wf@(RowNumber() | Rank(_) | DenseRank(_) | CumeDist() | PercentRank(_)) =>
-          val aggWindowFunc = wf.asInstanceOf[AggregateWindowFunction]
-          val frame = aggWindowFunc.frame.asInstanceOf[SpecifiedWindowFrame]
-          val windowFunctionNode = ExpressionBuilder.makeWindowFunction(
-            WindowFunctionsBuilder.create(args, aggWindowFunc).toInt,
-            new util.ArrayList[ExpressionNode](),
-            columnName,
-            ConverterUtils.getTypeNode(aggWindowFunc.dataType, aggWindowFunc.nullable),
-            WindowExecTransformer.getFrameBound(frame.upper),
-            WindowExecTransformer.getFrameBound(frame.lower),
-            frame.frameType.sql)
-          windowExpressionNodes.add(windowFunctionNode)
-        case aggExpression: AggregateExpression =>
-          val frame = wExpression.windowSpec.
-            frameSpecification.asInstanceOf[SpecifiedWindowFrame]
-          val aggregateFunc = aggExpression.aggregateFunction
-          val substraitAggFuncName = ExpressionMappings.expressionsMap.get(aggregateFunc.getClass)
-          if (substraitAggFuncName.isEmpty) {
-            throw new UnsupportedOperationException(s"Not currently supported: $aggregateFunc.")
-          }
+    windowExpression.map {
+      windowExpr =>
+        val aliasExpr = windowExpr.asInstanceOf[Alias]
+        val columnName = s"${aliasExpr.name}_${aliasExpr.exprId.id}"
+        val wExpression = aliasExpr.child.asInstanceOf[WindowExpression]
+        wExpression.windowFunction match {
+          case wf @ (RowNumber() | Rank(_) | DenseRank(_) | CumeDist() | PercentRank(_)) =>
+            val aggWindowFunc = wf.asInstanceOf[AggregateWindowFunction]
+            val frame = aggWindowFunc.frame.asInstanceOf[SpecifiedWindowFrame]
+            val windowFunctionNode = ExpressionBuilder.makeWindowFunction(
+              WindowFunctionsBuilder.create(args, aggWindowFunc).toInt,
+              new JArrayList[ExpressionNode](),
+              columnName,
+              ConverterUtils.getTypeNode(aggWindowFunc.dataType, aggWindowFunc.nullable),
+              WindowExecTransformer.getFrameBound(frame.upper),
+              WindowExecTransformer.getFrameBound(frame.lower),
+              frame.frameType.sql
+            )
+            windowExpressionNodes.add(windowFunctionNode)
+          case aggExpression: AggregateExpression =>
+            val frame = wExpression.windowSpec.frameSpecification.asInstanceOf[SpecifiedWindowFrame]
+            val aggregateFunc = aggExpression.aggregateFunction
+            val substraitAggFuncName = ExpressionMappings.expressionsMap.get(aggregateFunc.getClass)
+            if (substraitAggFuncName.isEmpty) {
+              throw new UnsupportedOperationException(s"Not currently supported: $aggregateFunc.")
+            }
 
-          val childrenNodeList = new util.ArrayList[ExpressionNode]()
-          aggregateFunc.children.foreach(
-            expr => childrenNodeList.add(
-              ExpressionConverter.replaceWithExpressionTransformer(expr,
-                originalInputAttributes).doTransform(args))
-          )
+            val childrenNodeList = aggregateFunc.children
+              .map(
+                ExpressionConverter
+                  .replaceWithExpressionTransformer(_, originalInputAttributes)
+                  .doTransform(args))
+              .asJava
 
-          val windowFunctionNode = ExpressionBuilder.makeWindowFunction(
-            AggregateFunctionsBuilder.create(args, aggExpression.aggregateFunction).toInt,
-            childrenNodeList,
-            columnName,
-            ConverterUtils.getTypeNode(aggExpression.dataType, aggExpression.nullable),
-            WindowExecTransformer.getFrameBound(frame.upper),
-            WindowExecTransformer.getFrameBound(frame.lower),
-            frame.frameType.sql)
-          windowExpressionNodes.add(windowFunctionNode)
-        case wf@(Lead(_, _, _, _) | Lag(_, _, _, _)) =>
-          val offset_wf = wf.asInstanceOf[FrameLessOffsetWindowFunction]
-          val frame = offset_wf.frame.asInstanceOf[SpecifiedWindowFrame]
-          val childrenNodeList = new util.ArrayList[ExpressionNode]()
-          childrenNodeList.add(ExpressionConverter.replaceWithExpressionTransformer(
-            offset_wf.input,
-            attributeSeq = originalInputAttributes).doTransform(args))
-          childrenNodeList.add(ExpressionConverter.replaceWithExpressionTransformer(
-            offset_wf.offset,
-            attributeSeq = originalInputAttributes).doTransform(args))
-          childrenNodeList.add(ExpressionConverter.replaceWithExpressionTransformer(
-            offset_wf.default,
-            attributeSeq = originalInputAttributes).doTransform(args))
-          val windowFunctionNode = ExpressionBuilder.makeWindowFunction(
-            WindowFunctionsBuilder.create(args, offset_wf).toInt,
-            childrenNodeList,
-            columnName,
-            ConverterUtils.getTypeNode(offset_wf.dataType, offset_wf.nullable),
-            WindowExecTransformer.getFrameBound(frame.upper),
-            WindowExecTransformer.getFrameBound(frame.lower),
-            frame.frameType.sql)
-          windowExpressionNodes.add(windowFunctionNode)
-        case wf@NthValue(input, offset: Literal, _) =>
-            val frame = wExpression.windowSpec
-              .frameSpecification.asInstanceOf[SpecifiedWindowFrame]
-            val childrenNodeList = new util.ArrayList[ExpressionNode]()
-            childrenNodeList.add(ExpressionConverter.replaceWithExpressionTransformer(
-              input,
-              attributeSeq = originalInputAttributes).doTransform(args))
-            childrenNodeList.add(new LiteralTransformer(offset).doTransform(args))
+            val windowFunctionNode = ExpressionBuilder.makeWindowFunction(
+              AggregateFunctionsBuilder.create(args, aggExpression.aggregateFunction).toInt,
+              childrenNodeList,
+              columnName,
+              ConverterUtils.getTypeNode(aggExpression.dataType, aggExpression.nullable),
+              WindowExecTransformer.getFrameBound(frame.upper),
+              WindowExecTransformer.getFrameBound(frame.lower),
+              frame.frameType.sql
+            )
+            windowExpressionNodes.add(windowFunctionNode)
+          case wf @ (Lead(_, _, _, _) | Lag(_, _, _, _)) =>
+            val offset_wf = wf.asInstanceOf[FrameLessOffsetWindowFunction]
+            val frame = offset_wf.frame.asInstanceOf[SpecifiedWindowFrame]
+            val childrenNodeList = new JArrayList[ExpressionNode]()
+            childrenNodeList.add(
+              ExpressionConverter
+                .replaceWithExpressionTransformer(
+                  offset_wf.input,
+                  attributeSeq = originalInputAttributes)
+                .doTransform(args))
+            childrenNodeList.add(
+              ExpressionConverter
+                .replaceWithExpressionTransformer(
+                  offset_wf.offset,
+                  attributeSeq = originalInputAttributes)
+                .doTransform(args))
+            childrenNodeList.add(
+              ExpressionConverter
+                .replaceWithExpressionTransformer(
+                  offset_wf.default,
+                  attributeSeq = originalInputAttributes)
+                .doTransform(args))
+            val windowFunctionNode = ExpressionBuilder.makeWindowFunction(
+              WindowFunctionsBuilder.create(args, offset_wf).toInt,
+              childrenNodeList,
+              columnName,
+              ConverterUtils.getTypeNode(offset_wf.dataType, offset_wf.nullable),
+              WindowExecTransformer.getFrameBound(frame.upper),
+              WindowExecTransformer.getFrameBound(frame.lower),
+              frame.frameType.sql
+            )
+            windowExpressionNodes.add(windowFunctionNode)
+          case wf @ NthValue(input, offset: Literal, ignoreNulls: Boolean) =>
+            val frame = wExpression.windowSpec.frameSpecification.asInstanceOf[SpecifiedWindowFrame]
+            val childrenNodeList = new JArrayList[ExpressionNode]()
+            childrenNodeList.add(
+              ExpressionConverter
+                .replaceWithExpressionTransformer(input, attributeSeq = originalInputAttributes)
+                .doTransform(args))
+            childrenNodeList.add(LiteralTransformer(offset).doTransform(args))
+            childrenNodeList.add(LiteralTransformer(Literal(ignoreNulls)).doTransform(args))
             val windowFunctionNode = ExpressionBuilder.makeWindowFunction(
               WindowFunctionsBuilder.create(args, wf).toInt,
               childrenNodeList,
@@ -390,12 +496,18 @@ trait SparkPlanExecApi {
               ConverterUtils.getTypeNode(wf.dataType, wf.nullable),
               frame.upper.sql,
               frame.lower.sql,
-              frame.frameType.sql)
+              frame.frameType.sql
+            )
             windowExpressionNodes.add(windowFunctionNode)
-        case _ =>
-          throw new UnsupportedOperationException("unsupported window function type: " +
-            wExpression.windowFunction)
-      }
+          case _ =>
+            throw new UnsupportedOperationException(
+              "unsupported window function type: " +
+                wExpression.windowFunction)
+        }
     }
   }
+
+  def genInjectedFunctions(): Seq[(FunctionIdentifier, ExpressionInfo, FunctionBuilder)] = Seq.empty
+
+  def rewriteSpillPath(path: String): String = path
 }

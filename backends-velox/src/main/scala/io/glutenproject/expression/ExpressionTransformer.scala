@@ -14,42 +14,45 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.expression
 
-import com.google.common.collect.Lists
 import io.glutenproject.expression.ConverterUtils.FunctionConfig
 import io.glutenproject.expression.ExpressionConverter.replaceWithExpressionTransformer
-import io.glutenproject.substrait.expression.{ExpressionBuilder, ExpressionNode, SelectionNode, StructLiteralNode}
+import io.glutenproject.substrait.expression._
+
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.types.{IntegerType, LongType}
+
+import com.google.common.collect.Lists
+
+import java.lang.{Integer => JInteger, Long => JLong}
+import java.util.{ArrayList => JArrayList, HashMap => JHashMap}
+
 import scala.language.existentials
 
-class AliasTransformer(substraitExprName: String,
-                       child: ExpressionTransformer,
-                       original: Expression)
-  extends AliasTransformerBase(substraitExprName, child, original) {
+case class VeloxAliasTransformer(
+    substraitExprName: String,
+    child: ExpressionTransformer,
+    original: Expression)
+  extends ExpressionTransformer {
 
   override def doTransform(args: java.lang.Object): ExpressionNode = {
     child.doTransform(args)
   }
 }
 
-case class NamedStructTransformer(substraitExprName: String,
-                                  original: CreateNamedStruct,
-                                  attributeSeq: Seq[Attribute])
-  extends NamedStructTransformerBase(substraitExprName, original, attributeSeq) {
+case class VeloxNamedStructTransformer(
+    substraitExprName: String,
+    original: CreateNamedStruct,
+    attributeSeq: Seq[Attribute])
+  extends ExpressionTransformer {
   override def doTransform(args: Object): ExpressionNode = {
-    var childrenTransformers = Seq[ExpressionTransformer]()
-    original.valExprs.foreach(child =>
-      childrenTransformers = childrenTransformers :+
-        replaceWithExpressionTransformer(child, attributeSeq)
-    )
     val expressionNodes = Lists.newArrayList[ExpressionNode]()
-    for (elem <- childrenTransformers) {
-      expressionNodes.add(elem.doTransform(args))
-    }
-    val functionMap = args.asInstanceOf[java.util.HashMap[String, java.lang.Long]]
+    original.valExprs.foreach(
+      child =>
+        expressionNodes.add(
+          replaceWithExpressionTransformer(child, attributeSeq).doTransform(args)))
+    val functionMap = args.asInstanceOf[JHashMap[String, JLong]]
     val functionName = ConverterUtils
       .makeFuncName(substraitExprName, Seq(original.dataType), FunctionConfig.OPT)
     val functionId = ExpressionBuilder.newScalarFunction(functionMap, functionName)
@@ -58,12 +61,12 @@ case class NamedStructTransformer(substraitExprName: String,
   }
 }
 
-class GetStructFieldTransformer(substraitExprName: String,
-                                childTransformer: ExpressionTransformer,
-                                ordinal: Int,
-                                original: GetStructField)
-  extends GetStructFieldTransformerBase(substraitExprName, childTransformer, ordinal, original) {
-
+case class VeloxGetStructFieldTransformer(
+    substraitExprName: String,
+    childTransformer: ExpressionTransformer,
+    ordinal: Int,
+    original: GetStructField)
+  extends ExpressionTransformer {
   override def doTransform(args: Object): ExpressionNode = {
     val childNode = childTransformer.doTransform(args)
     childNode match {
@@ -71,19 +74,18 @@ class GetStructFieldTransformer(substraitExprName: String,
         node.getFieldLiteral(ordinal)
       case node: SelectionNode =>
         // Append the nested index to selection node.
-        node.addNestedChildIdx(new Integer(ordinal))
+        node.addNestedChildIdx(JInteger.valueOf(ordinal))
       case other =>
         throw new UnsupportedOperationException(s"$other is not supported.")
     }
   }
 }
 
-
-case class HashExpressionTransformer(substraitExprName: String,
-                                     exps: Seq[ExpressionTransformer],
-                                     original: Expression)
-  extends HashExpressionTransformerBase(substraitExprName, exps, original) {
-
+case class VeloxHashExpressionTransformer(
+    substraitExprName: String,
+    exps: Seq[ExpressionTransformer],
+    original: Expression)
+  extends ExpressionTransformer {
   override def doTransform(args: java.lang.Object): ExpressionNode = {
     // As of Spark 3.3, there are 3 kinds of HashExpression.
     // HiveHash is not supported in native backend and will fail native validation.
@@ -95,18 +97,49 @@ case class HashExpressionTransformer(substraitExprName: String,
       case HiveHash(_) =>
         (ExpressionBuilder.makeIntLiteral(0), IntegerType)
     }
-    val nodes = new java.util.ArrayList[ExpressionNode]()
+    val nodes = new JArrayList[ExpressionNode]()
     // Seed as the first argument
     nodes.add(seedNode)
-    exps.foreach(expression => {
-      nodes.add(expression.doTransform(args))
-    })
+    exps.foreach(
+      expression => {
+        nodes.add(expression.doTransform(args))
+      })
     val childrenTypes = seedType +: original.children.map(child => child.dataType)
-    val functionMap = args.asInstanceOf[java.util.HashMap[String, java.lang.Long]]
-    val functionName = ConverterUtils.makeFuncName(substraitExprName,
-      childrenTypes, FunctionConfig.OPT)
+    val functionMap = args.asInstanceOf[JHashMap[String, JLong]]
+    val functionName =
+      ConverterUtils.makeFuncName(substraitExprName, childrenTypes, FunctionConfig.OPT)
     val functionId = ExpressionBuilder.newScalarFunction(functionMap, functionName)
     val typeNode = ConverterUtils.getTypeNode(original.dataType, original.nullable)
     ExpressionBuilder.makeScalarFunction(functionId, nodes, typeNode)
+  }
+}
+
+case class VeloxStringSplitTransformer(
+    substraitExprName: String,
+    srcExpr: ExpressionTransformer,
+    regexExpr: ExpressionTransformer,
+    limitExpr: ExpressionTransformer,
+    original: StringSplit)
+  extends ExpressionTransformer {
+
+  override def doTransform(args: java.lang.Object): ExpressionNode = {
+    if (
+      !regexExpr.isInstanceOf[LiteralTransformer] ||
+      !limitExpr.isInstanceOf[LiteralTransformer]
+    ) {
+      throw new UnsupportedOperationException(
+        "Gluten only supports literal input as limit/regex for split function.")
+    }
+
+    val limit = limitExpr.doTransform(args).asInstanceOf[IntLiteralNode].getValue
+    val regex = regexExpr.doTransform(args).asInstanceOf[StringLiteralNode].getValue
+    if (limit > 0 || regex.length > 1) {
+      throw new UnsupportedOperationException(
+        s"$original supported single-length regex and negative limit, but given $limit and $regex")
+    }
+
+    // TODO: split function support limit arg
+    GenericExpressionTransformer(substraitExprName, Seq(srcExpr, regexExpr), original)
+      .doTransform(args)
   }
 }

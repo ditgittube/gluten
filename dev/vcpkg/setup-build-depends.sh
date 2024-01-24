@@ -18,7 +18,7 @@ install_centos_any_maven() {
         fi
 
         cd /tmp
-        wget https://downloads.apache.org/maven/maven-3/$maven_version/binaries/apache-maven-$maven_version-bin.tar.gz
+        wget https://archive.apache.org/dist/maven/maven-3/$maven_version/binaries/apache-maven-$maven_version-bin.tar.gz
         tar -xvf apache-maven-$maven_version-bin.tar.gz
         rm apache-maven-$maven_version-bin.tar.gz
         mv apache-maven-$maven_version "${maven_install_dir}"
@@ -37,7 +37,7 @@ install_centos_7() {
         bison \
         java-1.8.0-openjdk java-1.8.0-openjdk-devel
 
-    # git>2.7.4
+    # Requires git >= 2.7.4
     if [[ "$(git --version)" != "git version 2."* ]]; then
         [ -f /etc/yum.repos.d/ius.repo ] || yum -y install https://repo.ius.io/ius-release-el7.rpm
         yum -y remove git
@@ -104,6 +104,33 @@ install_alinux_3() {
         cmake ninja-build perl-IPC-Cmd autoconf autoconf-archive automake libtool \
         libstdc++-static flex bison python3 \
         java-1.8.0-openjdk java-1.8.0-openjdk-devel
+}
+
+install_tencentos_3.2() {
+    yum -y install \
+        wget curl tar zip unzip git which \
+        cmake ninja-build perl-IPC-Cmd autoconf autoconf-archive automake libtool \
+        gcc-toolset-9-gcc gcc-toolset-9-gcc-c++ \
+        flex bison python3 \
+        java-8-konajdk
+
+    install_centos_any_maven
+}
+
+install_debian_11() {
+    apt-get -y install \
+        wget curl tar zip unzip git apt-transport-https \
+        build-essential ccache cmake ninja-build pkg-config autoconf autoconf-archive libtool \
+        flex bison
+
+    # Download the Eclipse Adoptium GPG key
+    wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor | tee /etc/apt/trusted.gpg.d/adoptium.gpg > /dev/null
+
+    # Configure the Eclipse Adoptium repository
+    echo "deb https://packages.adoptium.net/artifactory/deb $(awk -F= '/^VERSION_CODENAME/{print$2}' /etc/os-release) main" | tee /etc/apt/sources.list.d/adoptium.list
+
+    # Install JDK
+    apt update && apt-get -y install temurin-8-jdk
 }
 
 ## Install function end

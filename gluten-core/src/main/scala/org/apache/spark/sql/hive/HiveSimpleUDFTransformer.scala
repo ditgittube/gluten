@@ -16,17 +16,11 @@
  */
 package org.apache.spark.sql.hive
 
-import io.glutenproject.expression.ConverterUtils
-import io.glutenproject.expression.ExpressionConverter
-import io.glutenproject.expression.ExpressionTransformer
-import io.glutenproject.expression.UDFMappings
-import io.glutenproject.substrait.expression.ExpressionBuilder
-import io.glutenproject.substrait.expression.ExpressionNode
+import io.glutenproject.expression.{ExpressionConverter, ExpressionTransformer, GenericExpressionTransformer, UDFMappings}
 
-import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions._
 
-import java.util.ArrayList
+import java.util.Locale
 
 object HiveSimpleUDFTransformer {
   def isHiveSimpleUDF(expr: Expression): Boolean = {
@@ -44,38 +38,18 @@ object HiveSimpleUDFTransformer {
     }
 
     val udf = expr.asInstanceOf[HiveSimpleUDF]
-    val substraitExprName = UDFMappings.hiveUDFMap.get(udf.name.stripPrefix("default."))
+    val substraitExprName =
+      UDFMappings.hiveUDFMap.get(udf.name.stripPrefix("default.").toLowerCase(Locale.ROOT))
     substraitExprName match {
       case Some(name) =>
-        HiveSimpleUDFTransformer(
+        GenericExpressionTransformer(
           name,
-          udf.children.map(ExpressionConverter.replaceWithExpressionTransformer(_, attributeSeq)),
+          ExpressionConverter.replaceWithExpressionTransformer(udf.children, attributeSeq),
           udf)
-      case None =>
-        throw new UnsupportedOperationException(s"Not supported hive simple udf: $udf.")
+      case _ =>
+        throw new UnsupportedOperationException(
+          s"Not supported hive simple udf:$udf"
+            + s" name:${udf.name} hiveUDFMap:${UDFMappings.hiveUDFMap}")
     }
-  }
-}
-
-case class HiveSimpleUDFTransformer(
-    substraitExprName: String,
-    children: Seq[ExpressionTransformer],
-    original: HiveSimpleUDF)
-  extends ExpressionTransformer
-  with Logging {
-  override def doTransform(args: java.lang.Object): ExpressionNode = {
-    val functionMap = args.asInstanceOf[java.util.HashMap[String, java.lang.Long]]
-    val functionId = ExpressionBuilder.newScalarFunction(
-      functionMap,
-      ConverterUtils.makeFuncName(
-        substraitExprName,
-        original.children.map(_.dataType),
-        ConverterUtils.FunctionConfig.OPT))
-
-    val expressionNodes = new ArrayList[ExpressionNode]
-    children.foreach(child => expressionNodes.add(child.doTransform(args)))
-
-    val typeNode = ConverterUtils.getTypeNode(original.dataType, original.nullable)
-    ExpressionBuilder.makeScalarFunction(functionId, expressionNodes, typeNode)
   }
 }

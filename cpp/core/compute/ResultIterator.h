@@ -23,12 +23,22 @@
 
 namespace gluten {
 
-class Backend;
+class Runtime;
 
+// FIXME the code is tightly coupled with Velox plan execution. Should cleanup the abstraction for uses from
+//  other places.
 class ResultIterator {
  public:
-  explicit ResultIterator(std::unique_ptr<ColumnarBatchIterator> iter, std::shared_ptr<Backend> backend = nullptr)
-      : iter_(std::move(iter)), next_(nullptr), backend_(std::move(backend)) {}
+  explicit ResultIterator(std::unique_ptr<ColumnarBatchIterator> iter, Runtime* runtime = nullptr)
+      : iter_(std::move(iter)), next_(nullptr), runtime_(runtime) {}
+
+  // copy constructor and copy assignment (deleted)
+  ResultIterator(const ResultIterator& in) = delete;
+  ResultIterator& operator=(const ResultIterator&) = delete;
+
+  // move constructor and move assignment
+  ResultIterator(ResultIterator&& in) = default;
+  ResultIterator& operator=(ResultIterator&& in) = default;
 
   bool hasNext() {
     checkValid();
@@ -47,7 +57,7 @@ class ResultIterator {
     return iter_.get();
   }
 
-  std::shared_ptr<Metrics> getMetrics();
+  Metrics* getMetrics();
 
   void setExportNanos(int64_t exportNanos) {
     exportNanos_ = exportNanos;
@@ -76,7 +86,7 @@ class ResultIterator {
 
   std::unique_ptr<ColumnarBatchIterator> iter_;
   std::shared_ptr<ColumnarBatch> next_;
-  std::shared_ptr<Backend> backend_;
+  Runtime* runtime_;
   int64_t exportNanos_;
 };
 

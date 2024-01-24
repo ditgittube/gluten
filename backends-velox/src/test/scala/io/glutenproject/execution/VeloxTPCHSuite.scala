@@ -14,13 +14,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.execution
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.{Row, TestUtils}
 
-abstract class VeloxTPCHSuite extends WholeStageTransformerSuite {
+import java.io.File
+
+abstract class VeloxTPCHTableSupport extends VeloxWholeStageTransformerSuite {
   protected val rootPath: String = getClass.getResource("/").getPath
   override protected val backend: String = "velox"
   override protected val resourcePath: String = "/tpch-data-parquet-velox"
@@ -33,11 +34,6 @@ abstract class VeloxTPCHSuite extends WholeStageTransformerSuite {
   // TODO: result comparison is not supported currently.
   protected val queriesResults: String = rootPath + "queries-output"
 
-  override def beforeAll(): Unit = {
-    super.beforeAll()
-    createTPCHNotNullTables()
-  }
-
   override protected def sparkConf: SparkConf = {
     super.sparkConf
       .set("spark.shuffle.manager", "org.apache.spark.shuffle.sort.ColumnarShuffleManager")
@@ -48,92 +44,143 @@ abstract class VeloxTPCHSuite extends WholeStageTransformerSuite {
       .set("spark.sql.autoBroadcastJoinThreshold", "-1")
   }
 
+  override def beforeAll(): Unit = {
+    super.beforeAll()
+    createTPCHNotNullTables()
+  }
+}
+
+abstract class VeloxTPCHSuite extends VeloxTPCHTableSupport {
   test("TPC-H q1") {
-    runTPCHQuery(1, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(1, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q2") {
-    runTPCHQuery(2, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(2, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q3") {
-    runTPCHQuery(3, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(3, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q4") {
-    runTPCHQuery(4, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(4, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q5") {
-    runTPCHQuery(5, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(5, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q6") {
-    runTPCHQuery(6, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(6, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q7") {
-    runTPCHQuery(7, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(7, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q8") {
-    runTPCHQuery(8, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(8, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q9") {
-    runTPCHQuery(9, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(9, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q10") {
-    runTPCHQuery(10, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(10, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q11") {
-    runTPCHQuery(11, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(11, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q12") {
-    runTPCHQuery(12, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(12, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q13") {
-    runTPCHQuery(13, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(13, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q14") {
-    runTPCHQuery(14, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(14, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q15") {
-    runTPCHQuery(15, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(15, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q16") {
-    runTPCHQuery(16, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(16, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q17") {
-    runTPCHQuery(17, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(17, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q18") {
-    runTPCHQuery(18, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(18, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q19") {
-    runTPCHQuery(19, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(19, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q20") {
-    runTPCHQuery(20, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(20, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q21") {
-    runTPCHQuery(21, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(21, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("TPC-H q22") {
-    runTPCHQuery(22, veloxTPCHQueries, queriesResults, compareResult = false) { _ => }
+    runTPCHQuery(22, veloxTPCHQueries, queriesResults, compareResult = false, noFallBack = false) {
+      _ =>
+    }
   }
 
   test("test 'order by limit'") {
@@ -152,6 +199,19 @@ abstract class VeloxTPCHSuite extends WholeStageTransformerSuite {
   }
 }
 
+class VeloxTPCHDistinctSpill extends VeloxTPCHTableSupport {
+  override protected def sparkConf: SparkConf = {
+    super.sparkConf
+      .set("spark.memory.offHeap.size", "50m")
+      .set("spark.gluten.memory.overAcquiredMemoryRatio", "0.9") // to trigger distinct spill early
+  }
+
+  test("distinct spill") {
+    val df = spark.sql("select count(distinct *) from lineitem limit 1")
+    TestUtils.compareAnswers(df.collect(), Seq(Row(60175)))
+  }
+}
+
 class VeloxTPCHV1Suite extends VeloxTPCHSuite {
   override protected def sparkConf: SparkConf = {
     super.sparkConf
@@ -162,7 +222,7 @@ class VeloxTPCHV1Suite extends VeloxTPCHSuite {
 class VeloxTPCHV1BhjSuite extends VeloxTPCHSuite {
   override protected def sparkConf: SparkConf = {
     super.sparkConf
-      .set("spark.sql.sources.useV1SourceList", "")
+      .set("spark.sql.sources.useV1SourceList", "parquet")
       .set("spark.sql.autoBroadcastJoinThreshold", "30M")
   }
 }
@@ -170,7 +230,7 @@ class VeloxTPCHV1BhjSuite extends VeloxTPCHSuite {
 class VeloxTPCHV2Suite extends VeloxTPCHSuite {
   override protected def sparkConf: SparkConf = {
     super.sparkConf
-      .set("spark.sql.sources.useV1SourceList", "parquet")
+      .set("spark.sql.sources.useV1SourceList", "")
   }
 }
 
@@ -179,5 +239,35 @@ class VeloxTPCHV2BhjSuite extends VeloxTPCHSuite {
     super.sparkConf
       .set("spark.sql.sources.useV1SourceList", "")
       .set("spark.sql.autoBroadcastJoinThreshold", "30M")
+  }
+}
+
+class VeloxPartitionedTableTPCHSuite extends VeloxTPCHSuite {
+
+  override protected def sparkConf: SparkConf = {
+    super.sparkConf.set("spark.memory.offHeap.size", "4g")
+  }
+
+  override protected def createTPCHNotNullTables(): Unit = {
+    TPCHTableDataFrames = TPCHTables.map {
+      table =>
+        val tableDir = getClass.getResource(resourcePath).getFile
+        val tablePath = new File(tableDir, table.name).getAbsolutePath
+        val tableDF = spark.read.format(fileFormat).load(tablePath)
+
+        tableDF.write
+          .format(fileFormat)
+          .partitionBy(table.partitionColumns: _*)
+          .mode("append")
+          .saveAsTable(table.name)
+        (table.name, tableDF)
+    }.toMap
+  }
+
+  override protected def afterAll(): Unit = {
+    if (TPCHTableDataFrames != null) {
+      TPCHTableDataFrames.keys.foreach(table => spark.sql(s"DROP TABLE IF EXISTS $table"))
+    }
+    super.afterAll()
   }
 }

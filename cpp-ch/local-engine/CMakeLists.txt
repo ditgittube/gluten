@@ -1,16 +1,34 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+if (ENABLE_MULTITARGET_CODE)
+    add_definitions(-DENABLE_MULTITARGET_CODE=1)
+else()
+    add_definitions(-DENABLE_MULTITARGET_CODE=0)
+endif()
+
+set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -w -ffunction-sections -fdata-sections")
+set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w -ffunction-sections -fdata-sections")
+set (CMAKE_SHARED_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--no-export-dynamic -Wl,--gc-sections")
 
 if (COMPILER_CLANG AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
     set (CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} --ld-path=${LLD_WRAPPER}")
 else()
     set (CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} --ld-path=${LLD_PATH}")
 endif ()
-
-option(ENABLE_LOCAL_FORMATS "Use ORC/Parquet input formats defined in utils/local-engine/, notice that it is not stable and has some known issues. We suggest setting it to OFF in production environment." OFF)
-if (ENABLE_LOCAL_FORMATS)
-    add_definitions(-DENABLE_LOCAL_FORMATS=1)
-else()
-    add_definitions(-DENABLE_LOCAL_FORMATS=0)
-endif()
 
 set(THRIFT_INCLUDE_DIR "${ClickHouse_SOURCE_DIR}/contrib/thrift/lib/cpp/src")
 
@@ -26,10 +44,13 @@ set (ENABLE_CURL_BUILD OFF)
 add_subdirectory(proto)
 
 add_headers_and_sources(builder Builder)
+add_headers_and_sources(join Join)
 add_headers_and_sources(parser Parser)
+add_headers_and_sources(rewriter Rewriter)
 add_headers_and_sources(storages Storages)
 add_headers_and_sources(storages Storages/Output)
 add_headers_and_sources(storages Storages/Serializations)
+add_headers_and_sources(storages Storages/IO)
 add_headers_and_sources(common Common)
 add_headers_and_sources(external External)
 add_headers_and_sources(shuffle Shuffle)
@@ -46,22 +67,22 @@ include_directories(
         ${ClickHouse_SOURCE_DIR}/src
         ${ClickHouse_SOURCE_DIR}/base
         ${ClickHouse_SOURCE_DIR}/contrib/orc/c++/include
+        ${ClickHouse_SOURCE_DIR}/contrib/arrow-cmake/cpp/src/orc/c++/include
         ${CMAKE_BINARY_DIR}/contrib/orc/c++/include
         ${ClickHouse_SOURCE_DIR}/contrib/azure/sdk/storage/azure-storage-blobs/inc
         ${ClickHouse_SOURCE_DIR}/contrib/azure/sdk/core/azure-core/inc
         ${ClickHouse_SOURCE_DIR}/contrib/azure/sdk/storage/azure-storage-common/inc
 )
 
-if (ENABLE_LOCAL_FORMATS)
-    add_subdirectory(Storages/ch_parquet)
-endif()
-
+add_subdirectory(Storages/ch_parquet)
 add_subdirectory(Storages/SubstraitSource)
 add_subdirectory(Functions)
 
 add_library(gluten_clickhouse_backend_libs
         ${builder_sources}
+        ${join_sources}
         ${parser_sources}
+        ${rewriter_sources}
         ${storages_sources}
         ${common_sources}
         ${external_sources}
@@ -117,9 +138,7 @@ PRIVATE
         substrait
 )
 
-if (ENABLE_LOCAL_FORMATS)
-    target_link_libraries(${LOCALENGINE_SHARED_LIB} PUBLIC ch_parquet)
-endif ()
+target_link_libraries(${LOCALENGINE_SHARED_LIB} PUBLIC ch_parquet)
 
 if (ENABLE_JEMALLOC)
     target_link_options(${LOCALENGINE_SHARED_LIB} PRIVATE
@@ -130,3 +149,7 @@ else()
 endif()
 
 add_subdirectory(tests)
+
+if (ENABLE_EXAMPLES)
+    add_subdirectory(examples)
+endif()

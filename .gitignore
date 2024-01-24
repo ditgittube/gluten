@@ -1,6 +1,7 @@
 **/target/**
 *.class
 *.iml
+.DS_Store
 
 # logs
 *.log
@@ -38,6 +39,7 @@ target/
 *.iml
 
 **/target/**
+**/dependency-reduced-pom.xml
 
 # logs
 *.log
@@ -68,6 +70,7 @@ scalastyle-output.xml
 
 # Generated C++ benchmark data
 backends-velox/generated-native-benchmark/
+backends-velox/spark-warehouse/
 
 # Generated C++ benchmark executables
 cpp/**/benchmarks/**/*

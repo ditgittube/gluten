@@ -14,7 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.execution;
 
 import io.glutenproject.vectorized.CHColumnVector;
@@ -30,6 +29,8 @@ public class ColumnarNativeIterator extends GeneralInIterator implements Iterato
     super(delegated);
   }
 
+  private transient ColumnarBatch nextBatch = null;
+
   private static byte[] longtoBytes(long data) {
     return new byte[] {
       (byte) ((data >> 56) & 0xff),
@@ -41,6 +42,22 @@ public class ColumnarNativeIterator extends GeneralInIterator implements Iterato
       (byte) ((data >> 8) & 0xff),
       (byte) ((data >> 0) & 0xff),
     };
+  }
+
+  @Override
+  public boolean hasNext() {
+    while (delegated.hasNext()) {
+      nextBatch = delegated.next();
+      if (nextBatch.numRows() > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  @Override
+  public ColumnarBatch nextColumnarBatch() {
+    return nextBatch;
   }
 
   @Override

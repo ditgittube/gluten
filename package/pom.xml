@@ -20,7 +20,7 @@
   <parent>
     <groupId>io.glutenproject</groupId>
     <artifactId>gluten-parent</artifactId>
-    <version>0.5.0-SNAPSHOT</version>
+    <version>1.2.0-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
@@ -50,7 +50,7 @@
     </dependency>
     <dependency>
       <groupId>org.apache.spark</groupId>
-      <artifactId>spark-hive-thriftserver_${scala.binary.version}</artifactId>
+      <artifactId>spark-hive_${scala.binary.version}</artifactId>
       <scope>provided</scope>
     </dependency>
   </dependencies>
@@ -66,6 +66,16 @@
         <dependency>
           <groupId>io.glutenproject</groupId>
           <artifactId>backends-velox</artifactId>
+          <version>${project.version}</version>
+        </dependency>
+      </dependencies>
+    </profile>
+    <profile>
+      <id>rss</id>
+      <dependencies>
+        <dependency>
+          <groupId>io.glutenproject</groupId>
+          <artifactId>gluten-celeborn-package</artifactId>
           <version>${project.version}</version>
         </dependency>
       </dependencies>
@@ -91,11 +101,50 @@
               <relocations>
                 <relocation>
                   <pattern>com.google.protobuf</pattern>
-                  <shadedPattern>io.glutenproject.shaded.com.google.protobuf</shadedPattern>
+                  <shadedPattern>${gluten.shade.packageName}.com.google.protobuf</shadedPattern>
+                </relocation>
+                <!-- shaded com.google.guava -->
+                <relocation>
+                  <pattern>com.google.common</pattern>
+                  <shadedPattern>${gluten.shade.packageName}.com.google.common</shadedPattern>
+                  <includes>
+                    <include>com.google.common.**</include>
+                  </includes>
+                  <excludes>
+                    <exclude>com.google.common.jimfs.**</exclude>
+                  </excludes>
+                </relocation>
+                <relocation>
+                  <pattern>com.google.thirdparty</pattern>
+                  <shadedPattern>${gluten.shade.packageName}.com.google.thirdparty</shadedPattern>
+                  <includes>
+                    <include>com.google.thirdparty.**</include>
+                  </includes>
+                </relocation>
+                <relocation>
+                  <pattern>com.google.errorprone.annotations</pattern>
+                  <shadedPattern>${gluten.shade.packageName}.com.google.errorprone.annotations</shadedPattern>
+                  <includes>
+                    <include>com.google.errorprone.annotations.**</include>
+                  </includes>
+                </relocation>
+                <relocation>
+                  <pattern>com.google.j2objc</pattern>
+                  <shadedPattern>${gluten.shade.packageName}.com.google.j2objc</shadedPattern>
+                  <includes>
+                    <include>com.google.j2objc.**</include>
+                  </includes>
+                </relocation>
+                <relocation>
+                  <pattern>com.google.gson</pattern>
+                  <shadedPattern>${gluten.shade.packageName}.com.google.gson</shadedPattern>
+                  <includes>
+                    <include>com.google.gson.**</include>
+                  </includes>
                 </relocation>
                 <relocation>
                   <pattern>org.apache.arrow</pattern>
-                  <shadedPattern>io.glutenproject.shaded.org.apache.arrow</shadedPattern>
+                  <shadedPattern>${gluten.shade.packageName}.org.apache.arrow</shadedPattern>
                   <!--arrow's C wrapper refers to the original class path, so we should not relocate here-->
                   <excludes>
                     <exclude>org.apache.arrow.c.*</exclude>
@@ -104,7 +153,7 @@
                 </relocation>
                 <relocation>
                   <pattern>com.google.flatbuffers</pattern>
-                  <shadedPattern>io.glutenproject.shaded.com.google.flatbuffers</shadedPattern>
+                  <shadedPattern>${gluten.shade.packageName}.com.google.flatbuffers</shadedPattern>
                 </relocation>
               </relocations>
             </configuration>
@@ -188,6 +237,9 @@
                     <ignoreClass>org.apache.spark.unused.UnusedStubClass</ignoreClass>
                     <!-- jdo -->
                     <ignoreClass>javax.jdo.*</ignoreClass>
+                    <!-- javax -->
+                    <ignoreClass>javax.transaction.*</ignoreClass>
+                    <ignoreClass>javax.xml.*</ignoreClass>
                     <!-- log4j -->
                     <ignoreClass>org.apache.commons.logging.*</ignoreClass>
                     <!-- hive -->
@@ -208,6 +260,42 @@
                     <ignoreClass>org.apache.spark.sql.execution.datasources.BasicWriteJobStatsTracker$</ignoreClass>
                     <ignoreClass>org.apache.spark.sql.execution.stat.StatFunctions$</ignoreClass>
                     <ignoreClass>org.apache.spark.sql.execution.stat.StatFunctions$CovarianceCounter</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.DynamicPartitionDataConcurrentWriter$WriterStatus</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.DynamicPartitionDataSingleWriter</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.FileFormatWriter$Empty2Null$</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.DynamicPartitionDataConcurrentWriter$WriterIndex$</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.FileFormatDataWriter</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.DynamicPartitionDataConcurrentWriter</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.WriteTaskResult$</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.FileFormatWriter$OutputSpec</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.EmptyDirectoryDataWriter</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.FileFormatWriter$ConcurrentOutputWriterSpec$</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.SingleDirectoryDataWriter</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.FileFormatWriter$Empty2Null</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.BaseDynamicPartitionDataWriter</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.WriteJobDescription</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.DynamicPartitionDataConcurrentWriter$</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.SingleDirectoryDataWriter$</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.DynamicPartitionDataConcurrentWriter$WriterIndex</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.DynamicPartitionDataSingleWriter$</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.WriteTaskResult</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.FileFormatWriter$ConcurrentOutputWriterSpec</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.FileFormatWriter</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.ExecutedWriteSummary</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat$</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat*</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.orc.OrcFileFormat$</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.orc.OrcFileFormat*</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.FileFormatWriter$OutputSpec$</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.FileFormatWriter$</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.ExecutedWriteSummary$</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.EmptyDirectoryDataWriter$</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.WriterBucketSpec</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.WriterBucketSpec$</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.InsertIntoHadoopFsRelationCommand</ignoreClass>
+                    <ignoreClass>org.apache.spark.sql.execution.datasources.InsertIntoHadoopFsRelationCommand$</ignoreClass>
+                    <!-- protobuf -->
+                    <ignoreClass>com.google.protobuf.*</ignoreClass>
                   </ignoreClasses>
                   <scopes>
                     <scope>compile</scope>

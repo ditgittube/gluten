@@ -19,21 +19,29 @@ package io.glutenproject.backendsapi
 import io.glutenproject.metrics.{IMetrics, MetricsUpdater}
 import io.glutenproject.substrait.{AggregationParams, JoinParams}
 
-import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.SparkContext
-import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.{SparkPlan, WholeStageCodegenExec}
+import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
+
+import java.lang.{Long => JLong}
+import java.util.{List => JList, Map => JMap}
 
 trait MetricsApi extends Serializable {
 
   def genWholeStageTransformerMetrics(sparkContext: SparkContext): Map[String, SQLMetric] =
     Map(
-      "pipelineTime" -> SQLMetrics.createTimingMetric(sparkContext, "duration"))
+      "pipelineTime" -> SQLMetrics
+        .createTimingMetric(sparkContext, WholeStageCodegenExec.PIPELINE_DURATION_METRIC))
+
+  def genInputIteratorTransformerMetrics(sparkContext: SparkContext): Map[String, SQLMetric]
+
+  def genInputIteratorTransformerMetricsUpdater(metrics: Map[String, SQLMetric]): MetricsUpdater
 
   def metricsUpdatingFunction(
       child: SparkPlan,
-      relMap: java.util.HashMap[java.lang.Long, java.util.ArrayList[java.lang.Long]],
-      joinParamsMap: java.util.HashMap[java.lang.Long, JoinParams],
-      aggParamsMap: java.util.HashMap[java.lang.Long, AggregationParams]): IMetrics => Unit
+      relMap: JMap[JLong, JList[JLong]],
+      joinParamsMap: JMap[JLong, JoinParams],
+      aggParamsMap: JMap[JLong, AggregationParams]): IMetrics => Unit
 
   def genBatchScanTransformerMetrics(sparkContext: SparkContext): Map[String, SQLMetric]
 
@@ -79,6 +87,10 @@ trait MetricsApi extends Serializable {
 
   def genLimitTransformerMetricsUpdater(metrics: Map[String, SQLMetric]): MetricsUpdater
 
+  def genWriteFilesTransformerMetrics(sparkContext: SparkContext): Map[String, SQLMetric]
+
+  def genWriteFilesTransformerMetricsUpdater(metrics: Map[String, SQLMetric]): MetricsUpdater
+
   def genSortTransformerMetrics(sparkContext: SparkContext): Map[String, SQLMetric]
 
   def genSortTransformerMetricsUpdater(metrics: Map[String, SQLMetric]): MetricsUpdater
@@ -95,7 +107,10 @@ trait MetricsApi extends Serializable {
 
   def genHashJoinTransformerMetricsUpdater(metrics: Map[String, SQLMetric]): MetricsUpdater
 
+  def genGenerateTransformerMetrics(sparkContext: SparkContext): Map[String, SQLMetric]
+
+  def genGenerateTransformerMetricsUpdater(metrics: Map[String, SQLMetric]): MetricsUpdater
+
   def genColumnarInMemoryTableMetrics(sparkContext: SparkContext): Map[String, SQLMetric] =
-    Map(
-      "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"))
+    Map("numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"))
 }

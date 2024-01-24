@@ -2,25 +2,8 @@
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "builtin-baseline": "a7b6122f6b6504d16d96117336a0562693579933",
   "dependencies": ["jemalloc"],
-  "default-features": ["arrow", "velox", "velox-s3", "velox-hdfs"],
+  "default-features": ["velox", "velox-s3", "velox-gcs", "velox-hdfs", "velox-abfs"],
   "features": {
-    "arrow": {
-      "description": "Apache Arrow",
-      "dependencies": [
-        "libevent",
-        "libdwarf",
-        "openssl",
-        "orc",
-        "protobuf",
-        "rapidjson",
-        "snappy",
-        "xsimd",
-        "zlib",
-        "zstd",
-        "thrift",
-        "jemalloc"
-      ]
-    },
     "velox": {
       "description": "Velox backend",
       "dependencies": [
@@ -53,6 +36,7 @@
         "boost-program-options",
         "boost-process",
         "boost-regex",
+        "boost-locale",
         "boost-system",
         "boost-stacktrace",
         "boost-sort",
@@ -66,7 +50,7 @@
         "benchmark",
         "jemalloc",
         "icu",
-        "simdjson"
+        "thrift"
       ]
     },
     "velox-s3": {
@@ -74,11 +58,23 @@
       "dependencies": [
         {
           "name": "aws-sdk-cpp",
+	  "version>=": "1.11.169",
           "features": [
             "identity-management",
             "s3",
             "sts",
             "cognito-identity"
+          ]
+        }
+      ]
+    },
+    "velox-gcs": {
+      "description": "Velox GCS Support",
+      "dependencies": [
+        {
+          "name": "google-cloud-cpp",
+          "features": [
+            "storage"
           ]
         }
       ]
@@ -89,15 +85,30 @@
         "libhdfs3"
       ]
     },
+    "velox-abfs": {
+      "description": "Velox ABFS Support",
+      "dependencies": [
+        "azure-storage-blobs-cpp",
+        "azure-storage-files-datalake-cpp"
+      ]
+    },
     "hbm": {
       "description": "HBM",
       "dependencies": [
         "memkind"
       ]
+    },
+    "qat": {
+      "description": "QAT",
+      "dependencies": [
+        {
+	  "name": "zstd",
+	  "version>=": "1.5.4"
+        }
+      ]
     }
   },
   "overrides": [
-    { "name": "fmt", "version": "8.0.1" },
-    { "name": "simdjson", "version": "3.1.5" }
+    { "name": "fmt", "version": "8.0.1" }
   ]
 }

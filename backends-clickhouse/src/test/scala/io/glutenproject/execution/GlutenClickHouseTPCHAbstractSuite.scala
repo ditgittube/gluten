@@ -29,7 +29,9 @@ import org.scalatest.time.SpanSugar.convertIntToGrainOfTime
 
 import java.io.File
 
-abstract class GlutenClickHouseTPCHAbstractSuite extends WholeStageTransformerSuite with Logging {
+abstract class GlutenClickHouseTPCHAbstractSuite
+  extends GlutenClickHouseWholeStageTransformerSuite
+  with Logging {
 
   protected val createNullableTables = false
 
@@ -58,7 +60,7 @@ abstract class GlutenClickHouseTPCHAbstractSuite extends WholeStageTransformerSu
     FileUtils.forceMkdir(new File(metaStorePathAbsolute))
     FileUtils.copyDirectory(new File(rootPath + resourcePath), new File(tablesPath))
     super.beforeAll()
-    spark.sparkContext.setLogLevel("WARN")
+    spark.sparkContext.setLogLevel(logLevel)
     if (createNullableTables) {
       createTPCHNullableTables()
     } else {
@@ -516,8 +518,8 @@ abstract class GlutenClickHouseTPCHAbstractSuite extends WholeStageTransformerSu
       .set("spark.gluten.sql.columnar.iterator", "true")
       .set("spark.gluten.sql.columnar.hashagg.enablefinal", "true")
       .set("spark.gluten.sql.enable.native.validation", "false")
-      .set("spark.gluten.sql.columnar.forceShuffledHashJoin", "true")
       .set("spark.sql.warehouse.dir", warehouse)
+      .set("spark.sql.decimalOperations.allowPrecisionLoss", "false")
     /* .set("spark.sql.catalogImplementation", "hive")
       .set("javax.jdo.option.ConnectionURL", s"jdbc:derby:;databaseName=${
         metaStorePathAbsolute + "/metastore_db"};create=true") */

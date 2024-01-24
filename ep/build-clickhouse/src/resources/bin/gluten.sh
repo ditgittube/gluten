@@ -1,4 +1,18 @@
 #!/bin/bash
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 set -e
 
@@ -21,18 +35,16 @@ function start() {
   DRIVER_OPTIONS=${DRIVER_OPTIONS:-"-Dlog4j.configuration=file:${GLUTEN_HOME}/conf/log4j.properties"}
   DRIVER_OPTIONS="${DRIVER_OPTIONS} $(cat ${GLUTEN_HOME}/conf/gluten.properties | grep "^spark.driver.extraJavaOptions" | cut -d "=" -f 2)"
 
-  GLUTEN_JARS=${GLUTEN_HOME}/jars/*
-  echo "GLUTEN_JARS: ${GLUTEN_JARS} will be loaded."
-
+  GLUTEN_JARS=
   if [ "${SPARK_MAJOR_MINOR_VERSION}" == "3.2" ]; then
-      EXTRA_JARS=${GLUTEN_HOME}/extraJars/spark33/*
+      GLUTEN_JARS=${GLUTEN_HOME}/jars/spark32/*
   elif [ "${SPARK_MAJOR_MINOR_VERSION}" == "3.3" ]; then
-      EXTRA_JARS=${GLUTEN_HOME}/extraJars/spark33/*
+      GLUTEN_JARS=${GLUTEN_HOME}/jars/spark33/*
   else
       echo "Unsupported spark version: ${SPARK_MAJOR_MINOR_VERSION}"
       exit 1
   fi
-  echo "EXTRA_JARS: ${EXTRA_JARS} will be loaded."
+  echo "GLUTEN_JARS: ${GLUTEN_JARS} will be loaded."
 
   export LD_PRELOAD=${GLUTEN_HOME}/libs/libch.so
   export SPARK_LOG_DIR=${GLUTEN_HOME}/logs
@@ -40,8 +52,8 @@ function start() {
   rm -f ${GLUTEN_HOME}/logs/spark-*.out*
   nohup ${SPARK_HOME}/sbin/start-thriftserver.sh \
     --properties-file ${GLUTEN_HOME}/conf/spark-default.conf \
-    --conf spark.driver.extraClassPath=${GLUTEN_JARS}:${EXTRA_JARS} \
-    --conf spark.executor.extraClassPath=${GLUTEN_JARS}:${EXTRA_JARS} \
+    --conf spark.driver.extraClassPath=${GLUTEN_JARS} \
+    --conf spark.executor.extraClassPath=${GLUTEN_JARS} \
     --conf spark.driver.extraJavaOptions=${DRIVER_OPTIONS} \
     --conf spark.gluten.sql.columnar.libpath=${GLUTEN_HOME}/libs/libch.so \
     --verbose \

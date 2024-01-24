@@ -1,6 +1,8 @@
-ARG OS_IMAGE
+ARG OS_IMAGE_NAME
+ARG OS_IMAGE_TAG
 
-FROM $OS_IMAGE AS gluten-buildenv
+FROM $OS_IMAGE_NAME:$OS_IMAGE_TAG AS gluten-buildenv
+
 MAINTAINER Hongze Zhang<hongze.zhang@intel.com>
 
 SHELL ["/bin/bash", "-c"]
@@ -41,8 +43,8 @@ RUN env
 RUN cat /root/.m2/settings.xml
 
 # Install deps from repo
-ARG OS_VERSION
-COPY centos-$OS_VERSION-deps.sh /tmp/deps.sh
+ARG OS_IMAGE_TAG
+COPY centos-$OS_IMAGE_TAG-deps.sh /tmp/deps.sh
 RUN /tmp/deps.sh \
   && rm /tmp/deps.sh \
   && yum clean all \
@@ -56,9 +58,13 @@ RUN wget https://downloads.apache.org/maven/maven-3/3.8.8/binaries/apache-maven-
     rm apache-maven-3.8.8-bin.tar.gz && \
     mv apache-maven-3.8.8 /usr/lib/maven
 
-# Install Spark 3.2.2
-RUN cd /opt && git clone --depth 1 --branch v3.2.2 https://github.com/apache/spark.git spark322
-RUN cd /opt/spark322 && ./build/mvn -Pyarn -DskipTests clean install
+# # Build & install Spark 3.2.2
+# RUN cd /opt && git clone --depth 1 --branch v3.2.2 https://github.com/apache/spark.git spark322
+# RUN cd /opt/spark322 && ./build/mvn -Pyarn -DskipTests clean install
+
+# # Build & install Spark 3.3.1
+# RUN cd /opt && git clone --depth 1 --branch v3.3.1 https://github.com/apache/spark.git spark331
+# RUN cd /opt/spark331 && ./build/mvn -Pyarn -DskipTests clean install
 
 ENV PATH="$PATH:/usr/lib/maven/bin"
 ENV LD_LIBRARY_PATH=/usr/local/lib64:/usr/local/lib:/usr/lib64:/usr/lib:/lib64:/lib
@@ -68,4 +74,4 @@ RUN yum -y install sudo \
     && yum clean all
 RUN echo '%wheel ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
 
-COPY env.sh /env.sh
+COPY scripts/env.sh /env.sh

@@ -16,67 +16,133 @@
  */
 package io.glutenproject.backendsapi.clickhouse
 
-import io.glutenproject.GlutenConfig
+import io.glutenproject.{CH_BRANCH, CH_COMMIT, GlutenConfig, GlutenPlugin}
 import io.glutenproject.backendsapi._
 import io.glutenproject.expression.WindowFunctionsBuilder
+import io.glutenproject.extension.ValidationResult
 import io.glutenproject.substrait.rel.LocalFilesNode.ReadFileFormat
-import io.glutenproject.substrait.rel.LocalFilesNode.ReadFileFormat.{JsonReadFormat, MergeTreeReadFormat, OrcReadFormat, ParquetReadFormat, TextReadFormat}
+import io.glutenproject.substrait.rel.LocalFilesNode.ReadFileFormat._
 
+import org.apache.spark.SparkEnv
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.catalyst.expressions.{Alias, DenseRank, Lag, Lead, NamedExpression, Rank, RowNumber}
+import org.apache.spark.sql.catalyst.catalog.BucketSpec
+import org.apache.spark.sql.catalyst.expressions.{Alias, AttributeReference, DenseRank, Lag, Lead, NamedExpression, Rank, RowNumber}
 import org.apache.spark.sql.catalyst.expressions.aggregate.AggregateExpression
-import org.apache.spark.sql.catalyst.plans.physical.Partitioning
+import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, Partitioning}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
+import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.types.StructField
+import org.apache.spark.sql.types.{ArrayType, MapType, StructField, StructType}
+
+import java.util.Locale
 
 import scala.util.control.Breaks.{break, breakable}
 
 class CHBackend extends Backend {
-  override def name(): String = GlutenConfig.GLUTEN_CLICKHOUSE_BACKEND
-  override def contextApi(): ContextApi = new CHContextApi
+  override def name(): String = CHBackend.BACKEND_NAME
+  override def buildInfo(): GlutenPlugin.BackendBuildInfo =
+    GlutenPlugin.BackendBuildInfo("ClickHouse", CH_BRANCH, CH_COMMIT, "UNKNOWN")
   override def iteratorApi(): IteratorApi = new CHIteratorApi
   override def sparkPlanExecApi(): SparkPlanExecApi = new CHSparkPlanExecApi
   override def transformerApi(): TransformerApi = new CHTransformerApi
   override def validatorApi(): ValidatorApi = new CHValidatorApi
   override def metricsApi(): MetricsApi = new CHMetricsApi
+  override def listenerApi(): ListenerApi = new CHListenerApi
+  override def broadcastApi(): BroadcastApi = new CHBroadcastApi
   override def settings(): BackendSettingsApi = CHBackendSettings
+}
+
+object CHBackend {
+  val BACKEND_NAME = "ch"
 }
 
 object CHBackendSettings extends BackendSettingsApi with Logging {
 
-  val GLUTEN_CLICKHOUSE_SEP_SCAN_RDD = "spark.gluten.sql.columnar.separate.scan.rdd.for.ch"
-  val GLUTEN_CLICKHOUSE_SEP_SCAN_RDD_DEFAULT = "false"
+  private val GLUTEN_CLICKHOUSE_SEP_SCAN_RDD = "spark.gluten.sql.columnar.separate.scan.rdd.for.ch"
+  private val GLUTEN_CLICKHOUSE_SEP_SCAN_RDD_DEFAULT = "false"
 
   // experimental: when the files count per partition exceeds this threshold,
   // it will put the files into one partition.
-  val GLUTEN_CLICKHOUSE_FILES_PER_PARTITION_THRESHOLD =
-    GlutenConfig.GLUTEN_CONFIG_PREFIX + GlutenConfig.GLUTEN_CLICKHOUSE_BACKEND +
+  val GLUTEN_CLICKHOUSE_FILES_PER_PARTITION_THRESHOLD: String =
+    GlutenConfig.GLUTEN_CONFIG_PREFIX + CHBackend.BACKEND_NAME +
       ".files.per.partition.threshold"
   val GLUTEN_CLICKHOUSE_FILES_PER_PARTITION_THRESHOLD_DEFAULT = "-1"
 
-  val GLUTEN_CLICKHOUSE_CUSTOMIZED_SHUFFLE_CODEC_ENABLE =
-    GlutenConfig.GLUTEN_CONFIG_PREFIX + GlutenConfig.GLUTEN_CLICKHOUSE_BACKEND +
+  private val GLUTEN_CLICKHOUSE_CUSTOMIZED_SHUFFLE_CODEC_ENABLE: String =
+    GlutenConfig.GLUTEN_CONFIG_PREFIX + CHBackend.BACKEND_NAME +
       ".customized.shuffle.codec.enable"
-  val GLUTEN_CLICKHOUSE_CUSTOMIZED_SHUFFLE_CODEC_ENABLE_DEFAULT = "false"
+  private val GLUTEN_CLICKHOUSE_CUSTOMIZED_SHUFFLE_CODEC_ENABLE_DEFAULT = false
+  lazy val useCustomizedShuffleCodec: Boolean = SparkEnv.get.conf.getBoolean(
+    CHBackendSettings.GLUTEN_CLICKHOUSE_CUSTOMIZED_SHUFFLE_CODEC_ENABLE,
+    CHBackendSettings.GLUTEN_CLICKHOUSE_CUSTOMIZED_SHUFFLE_CODEC_ENABLE_DEFAULT
+  )
 
-  val GLUTEN_CLICKHOUSE_CUSTOMIZED_BUFFER_SIZE =
-    GlutenConfig.GLUTEN_CONFIG_PREFIX + GlutenConfig.GLUTEN_CLICKHOUSE_BACKEND +
+  private val GLUTEN_CLICKHOUSE_CUSTOMIZED_BUFFER_SIZE: String =
+    GlutenConfig.GLUTEN_CONFIG_PREFIX + CHBackend.BACKEND_NAME +
       ".customized.buffer.size"
-  val GLUTEN_CLICKHOUSE_CUSTOMIZED_BUFFER_SIZE_DEFAULT = "4096"
+  private val GLUTEN_CLICKHOUSE_CUSTOMIZED_BUFFER_SIZE_DEFAULT = 4096
+  lazy val customizeBufferSize: Int = SparkEnv.get.conf.getInt(
+    CHBackendSettings.GLUTEN_CLICKHOUSE_CUSTOMIZED_BUFFER_SIZE,
+    CHBackendSettings.GLUTEN_CLICKHOUSE_CUSTOMIZED_BUFFER_SIZE_DEFAULT
+  )
 
   val GLUTEN_CLICKHOUSE_BROADCAST_CACHE_EXPIRED_TIME: String =
-    GlutenConfig.GLUTEN_CONFIG_PREFIX + GlutenConfig.GLUTEN_CLICKHOUSE_BACKEND +
+    GlutenConfig.GLUTEN_CONFIG_PREFIX + CHBackend.BACKEND_NAME +
       ".broadcast.cache.expired.time"
   // unit: SECONDS, default 1 day
   val GLUTEN_CLICKHOUSE_BROADCAST_CACHE_EXPIRED_TIME_DEFAULT: Int = 86400
+
+  private val GLUTEN_CLICKHOUSE_SHUFFLE_SUPPORTED_CODEC: Set[String] = Set("lz4", "zstd", "snappy")
+
+  // The algorithm for hash partition of the shuffle
+  private val GLUTEN_CLICKHOUSE_SHUFFLE_HASH_ALGORITHM: String =
+    GlutenConfig.GLUTEN_CONFIG_PREFIX + CHBackend.BACKEND_NAME +
+      ".shuffle.hash.algorithm"
+  // valid values are: cityHash64 or sparkMurmurHash3_32
+  private val GLUTEN_CLICKHOUSE_SHUFFLE_HASH_ALGORITHM_DEFAULT = "sparkMurmurHash3_32"
+  def shuffleHashAlgorithm: String = {
+    val algorithm = SparkEnv.get.conf.get(
+      CHBackendSettings.GLUTEN_CLICKHOUSE_SHUFFLE_HASH_ALGORITHM,
+      CHBackendSettings.GLUTEN_CLICKHOUSE_SHUFFLE_HASH_ALGORITHM_DEFAULT
+    )
+    if (!algorithm.equals("cityHash64") && !algorithm.equals("sparkMurmurHash3_32")) {
+      CHBackendSettings.GLUTEN_CLICKHOUSE_SHUFFLE_HASH_ALGORITHM_DEFAULT
+    } else {
+      algorithm
+    }
+  }
+
+  val GLUTEN_CLICKHOUSE_AFFINITY_MODE: String =
+    GlutenConfig.GLUTEN_CONFIG_PREFIX + CHBackend.BACKEND_NAME + ".affinity.mode"
+  val SOFT: String = "soft"
+  val FORCE: String = "force"
+  private val GLUTEN_CLICKHOUSE_AFFINITY_MODE_DEFAULT = SOFT
+
+  val GLUTEN_MAX_BLOCK_SIZE: String =
+    GlutenConfig.GLUTEN_CONFIG_PREFIX + CHBackend.BACKEND_NAME +
+      ".runtime_settings.max_block_size"
+  // Same as default value in clickhouse
+  val GLUTEN_MAX_BLOCK_SIZE_DEFAULT = 65409
+  val GLUTEN_MAX_SHUFFLE_READ_BYTES: String =
+    GlutenConfig.GLUTEN_CONFIG_PREFIX + CHBackend.BACKEND_NAME +
+      ".runtime_config.max_source_concatenate_bytes"
+  val GLUTEN_MAX_SHUFFLE_READ_BYTES_DEFAULT = -1
+
+  def affinityMode: String = {
+    SparkEnv.get.conf
+      .get(
+        CHBackendSettings.GLUTEN_CLICKHOUSE_AFFINITY_MODE,
+        CHBackendSettings.GLUTEN_CLICKHOUSE_AFFINITY_MODE_DEFAULT
+      )
+      .toLowerCase(Locale.getDefault)
+  }
 
   override def supportFileFormatRead(
       format: ReadFileFormat,
       fields: Array[StructField],
       partTable: Boolean,
-      paths: Seq[String]): Boolean = {
+      paths: Seq[String]): ValidationResult = {
 
     def validateFilePath: Boolean = {
       // Fallback to vanilla spark when the input path
@@ -87,13 +153,40 @@ object CHBackendSettings extends BackendSettingsApi with Logging {
       true
     }
 
+    // Validate if all types are supported.
+    def hasComplexType: Boolean = {
+      // Collect unsupported types.
+      val unsupportedDataTypes = fields.map(_.dataType).collect {
+        case _: MapType => "MapType"
+        case _: StructType => "StructType"
+        case _: ArrayType => "ArrayType"
+      }
+      for (unsupportedDataType <- unsupportedDataTypes) {
+        // scalastyle:off println
+        println(
+          s"Validation failed for ${this.getClass.toString}" +
+            s" due to: data type $unsupportedDataType. in file schema. ")
+        // scalastyle:on println
+      }
+      !unsupportedDataTypes.isEmpty
+    }
     format match {
-      case ParquetReadFormat => validateFilePath
-      case OrcReadFormat => true
-      case MergeTreeReadFormat => true
-      case TextReadFormat => true
-      case JsonReadFormat => true
-      case _ => false
+      case ParquetReadFormat =>
+        if (validateFilePath) {
+          ValidationResult.ok
+        } else {
+          ValidationResult.notOk("Validate file path failed.")
+        }
+      case OrcReadFormat => ValidationResult.ok
+      case MergeTreeReadFormat => ValidationResult.ok
+      case TextReadFormat =>
+        if (!hasComplexType) {
+          ValidationResult.ok
+        } else {
+          ValidationResult.notOk("Has complex type.")
+        }
+      case JsonReadFormat => ValidationResult.ok
+      case _ => ValidationResult.notOk(s"Unsupported file format $format")
     }
   }
 
@@ -101,14 +194,20 @@ object CHBackendSettings extends BackendSettingsApi with Logging {
   override def supportShuffleWithProject(
       outputPartitioning: Partitioning,
       child: SparkPlan): Boolean = {
-    // FIXME: The HashAggregateExec's output is different from backend, cannot use directly.
     child match {
-      case _: HashAggregateExec =>
-        logInfo(
-          s"Not support shuffleExechangeExec with child of HashAggregateExec, which" +
-            s" has expressions in partitioning")
-        false
-      case _ => true
+      case hash: HashAggregateExec =>
+        if (hash.aggregateExpressions.isEmpty) {
+          true
+        } else {
+          outputPartitioning match {
+            case hashPartitioning: HashPartitioning =>
+              hashPartitioning.expressions.exists(x => !x.isInstanceOf[AttributeReference])
+            case _ =>
+              false
+          }
+        }
+      case _ =>
+        true
     }
   }
 
@@ -130,7 +229,7 @@ object CHBackendSettings extends BackendSettingsApi with Logging {
           wExpression.windowFunction match {
             case _: RowNumber | _: AggregateExpression | _: Rank | _: Lead | _: Lag |
                 _: DenseRank =>
-              allSupported = allSupported && true
+              allSupported = allSupported
             case _ =>
               logDebug(s"Not support window function: ${wExpression.getClass}")
               allSupported = false
@@ -151,6 +250,35 @@ object CHBackendSettings extends BackendSettingsApi with Logging {
       .toBoolean
 
   /** Get the config prefix for each backend */
-  override def getBackendConfigPrefix(): String =
-    GlutenConfig.GLUTEN_CONFIG_PREFIX + GlutenConfig.GLUTEN_CLICKHOUSE_BACKEND
+  override def getBackendConfigPrefix: String =
+    GlutenConfig.GLUTEN_CONFIG_PREFIX + CHBackend.BACKEND_NAME
+
+  override def shuffleSupportedCodec(): Set[String] = GLUTEN_CLICKHOUSE_SHUFFLE_SUPPORTED_CODEC
+  override def needOutputSchemaForPlan(): Boolean = true
+
+  override def allowDecimalArithmetic: Boolean = !SQLConf.get.decimalOperationsAllowPrecisionLoss
+
+  override def requiredInputFilePaths(): Boolean = true
+
+  override def enableBloomFilterAggFallbackRule(): Boolean = false
+
+  def maxShuffleReadRows(): Long = {
+    SparkEnv.get.conf
+      .getLong(GLUTEN_MAX_BLOCK_SIZE, GLUTEN_MAX_BLOCK_SIZE_DEFAULT)
+  }
+
+  def maxShuffleReadBytes(): Long = {
+    SparkEnv.get.conf
+      .getLong(GLUTEN_MAX_SHUFFLE_READ_BYTES, GLUTEN_MAX_SHUFFLE_READ_BYTES_DEFAULT)
+  }
+
+  override def supportWriteFilesExec(
+      format: FileFormat,
+      fields: Array[StructField],
+      bucketSpec: Option[BucketSpec],
+      options: Map[String, String]): Option[String] = Some("Unsupported")
+
+  override def enableNativeWriteFiles(): Boolean = {
+    GlutenConfig.getConf.enableNativeWriter.getOrElse(false)
+  }
 }

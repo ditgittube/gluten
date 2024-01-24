@@ -20,6 +20,7 @@ import io.glutenproject.extension.GlutenPlan
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.optimizer.BuildLeft
+import org.apache.spark.sql.execution.InputIteratorTransformer
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, AdaptiveSparkPlanHelper}
 
 class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
@@ -43,6 +44,10 @@ class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
       .set("spark.sql.autoBroadcastJoinThreshold", "10MB")
       .set("spark.gluten.sql.columnar.backend.ch.use.v2", "false")
       .set("spark.sql.adaptive.enabled", "true")
+      .set("spark.gluten.sql.columnar.backend.ch.shuffle.hash.algorithm", "sparkMurmurHash3_32")
+      .set(
+        "spark.gluten.sql.columnar.backend.ch.runtime_config.enable_streaming_aggregating",
+        "true")
   }
 
   override protected def createTPCHNotNullTables(): Unit = {
@@ -56,19 +61,28 @@ class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
         val plans = collect(df.queryExecution.executedPlan) {
           case scanExec: BasicScanExecTransformer => scanExec
           case hashAggExec: HashAggregateExecBaseTransformer => hashAggExec
+          case inputIteratorTransformer: InputIteratorTransformer => inputIteratorTransformer
         }
-        assert(plans.size == 3)
+        assert(plans.size == 5)
 
-        assert(plans(2).metrics("numFiles").value === 1)
-        assert(plans(2).metrics("pruningTime").value === -1)
-        assert(plans(2).metrics("filesSize").value === 17777735)
+        assert(plans(4).metrics("numFiles").value === 1)
+        assert(plans(4).metrics("pruningTime").value === -1)
+        assert(plans(4).metrics("filesSize").value === 19230111)
+        assert(plans(4).metrics("outputRows").value === 600572)
 
-        assert(plans(1).metrics("outputRows").value === 4)
-        assert(plans(1).metrics("outputVectors").value === 1)
+        assert(plans(3).metrics("inputRows").value === 591673)
+        assert(plans(3).metrics("outputRows").value === 4)
+        assert(plans(3).metrics("outputVectors").value === 1)
+
+        assert(plans(2).metrics("inputRows").value === 8)
+        assert(plans(2).metrics("outputRows").value === 8)
 
         // Execute Sort operator, it will read the data twice.
-        assert(plans(0).metrics("outputRows").value === 8)
-        assert(plans(0).metrics("outputVectors").value === 2)
+        assert(plans(1).metrics("outputRows").value === 8)
+        assert(plans(1).metrics("outputVectors").value === 2)
+
+        assert(plans(0).metrics("inputRows").value === 4)
+        assert(plans(0).metrics("outputRows").value === 4)
     }
   }
 
@@ -85,8 +99,9 @@ class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
 
           assert(plans(2).metrics("numFiles").value === 1)
           assert(plans(2).metrics("pruningTime").value === -1)
-          assert(plans(2).metrics("filesSize").value === 17777735)
+          assert(plans(2).metrics("filesSize").value === 19230111)
 
+          assert(plans(1).metrics("inputRows").value === 591673)
           assert(plans(1).metrics("outputRows").value === 4)
           assert(plans(1).metrics("outputVectors").value === 1)
 
@@ -117,6 +132,24 @@ class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
             case shj: ShuffledHashJoinExecTransformerBase if shj.joinBuildSide == BuildLeft => shj
           }
           assert(shjBuildLeft.size == 2)
+
+          val inputIteratorTransformers = collect(df.queryExecution.executedPlan) {
+            case inputIteratorTransformer: InputIteratorTransformer => inputIteratorTransformer
+          }
+
+          assert(inputIteratorTransformers.size == 4)
+
+          assert(inputIteratorTransformers(3).metrics("inputRows").value === 324322)
+          assert(inputIteratorTransformers(3).metrics("outputRows").value === 324322)
+
+          assert(inputIteratorTransformers(2).metrics("inputRows").value === 72678)
+          assert(inputIteratorTransformers(2).metrics("outputRows").value === 72678)
+
+          assert(inputIteratorTransformers(1).metrics("inputRows").value === 3111)
+          assert(inputIteratorTransformers(1).metrics("outputRows").value === 3111)
+
+          assert(inputIteratorTransformers(0).metrics("inputRows").value === 15224)
+          assert(inputIteratorTransformers(0).metrics("outputRows").value === 15224)
       }
     }
   }
@@ -246,7 +279,17 @@ class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
   }
 
   test("TPCH Q21") {
-    runTPCHQuery(21, noFallBack = false) { df => }
+    runTPCHQuery(21, noFallBack = false) {
+      df =>
+        val plans = collect(df.queryExecution.executedPlan) {
+          case scanExec: BasicScanExecTransformer => scanExec
+          case filterExec: FilterExecTransformerBase => filterExec
+        }
+        assert(plans(2).metrics("inputRows").value === 600572)
+        assert(plans(2).metrics("outputRows").value === 379809)
+
+        assert(plans(3).metrics("outputRows").value === 600572)
+    }
   }
 
   test("TPCH Q22") {
@@ -270,6 +313,46 @@ class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
           }
           assert(glutenPlans.isEmpty)
       }
+    }
+  }
+
+  test("collect_set") {
+    val sql =
+      """
+        |select a, b from (
+        |select n_regionkey as a, collect_set(if(n_regionkey=0, n_name, null))
+        | as set from nation group by n_regionkey)
+        |lateral view explode(set) as b
+        |order by a, b
+        |""".stripMargin
+    runQueryAndCompare(sql)(checkOperatorMatch[CHHashAggregateExecTransformer])
+  }
+
+  test("test 'aggregate function collect_list'") {
+    val df = runQueryAndCompare(
+      "select l_orderkey,from_unixtime(l_orderkey, 'yyyy-MM-dd HH:mm:ss') " +
+        "from lineitem order by l_orderkey desc limit 10"
+    )(checkOperatorMatch[ProjectExecTransformer])
+    checkLengthAndPlan(df, 10)
+  }
+
+  test("test max string") {
+    withSQLConf(("spark.gluten.sql.columnar.force.hashagg", "true")) {
+      val sql =
+        """
+          |SELECT
+          |    l_returnflag,
+          |    l_linestatus,
+          |    max(l_comment)
+          |FROM
+          |    lineitem
+          |WHERE
+          |    l_shipdate <= date'1998-09-02' - interval 1 day
+          |GROUP BY
+          |    l_returnflag,
+          |    l_linestatus
+          |""".stripMargin
+      runQueryAndCompare(sql) { df => }
     }
   }
 }

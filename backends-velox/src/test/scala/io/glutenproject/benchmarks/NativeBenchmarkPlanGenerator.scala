@@ -14,10 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.glutenproject.benchmarks
 
-import io.glutenproject.execution.{WholeStageTransformer, WholeStageTransformerSuite}
+import io.glutenproject.GlutenConfig
+import io.glutenproject.execution.{VeloxWholeStageTransformerSuite, WholeStageTransformer}
 
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, ShuffleQueryStageExec}
 import org.apache.spark.sql.internal.SQLConf
@@ -33,7 +33,7 @@ import scala.collection.JavaConverters._
 
 object GenerateExample extends Tag("io.glutenproject.tags.GenerateExample")
 
-class NativeBenchmarkPlanGenerator extends WholeStageTransformerSuite {
+class NativeBenchmarkPlanGenerator extends VeloxWholeStageTransformerSuite {
   override protected val backend: String = "velox"
   override protected val resourcePath: String = "/tpch-data-parquet-velox"
   override protected val fileFormat: String = "parquet"
@@ -51,7 +51,9 @@ class NativeBenchmarkPlanGenerator extends WholeStageTransformerSuite {
   }
 
   test("Test plan json non-empty - AQE off") {
-    withSQLConf(SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false") {
+    withSQLConf(
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+      GlutenConfig.CACHE_WHOLE_STAGE_TRANSFORMER_CONTEXT.key -> "true") {
       val df = spark
         .sql("""
                |select * from lineitem
@@ -59,16 +61,19 @@ class NativeBenchmarkPlanGenerator extends WholeStageTransformerSuite {
       val executedPlan = df.queryExecution.executedPlan
       val lastStageTransformer = executedPlan.find(_.isInstanceOf[WholeStageTransformer])
       assert(lastStageTransformer.nonEmpty)
-      var planJson = lastStageTransformer.get.asInstanceOf[WholeStageTransformer].getPlanJson
-      assert(planJson.isEmpty)
+      var planJson = lastStageTransformer.get.asInstanceOf[WholeStageTransformer].substraitPlanJson
+      assert(planJson.nonEmpty)
       executedPlan.execute()
-      planJson = lastStageTransformer.get.asInstanceOf[WholeStageTransformer].getPlanJson
+      planJson = lastStageTransformer.get.asInstanceOf[WholeStageTransformer].substraitPlanJson
       assert(planJson.nonEmpty)
     }
+    spark.sparkContext.setLogLevel(logLevel)
   }
 
   test("Test plan json non-empty - AQE on") {
-    withSQLConf(SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "true") {
+    withSQLConf(
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "true",
+      GlutenConfig.CACHE_WHOLE_STAGE_TRANSFORMER_CONTEXT.key -> "true") {
       val df = spark
         .sql("""
                |select * from lineitem join orders on l_orderkey = o_orderkey
@@ -80,16 +85,18 @@ class NativeBenchmarkPlanGenerator extends WholeStageTransformerSuite {
       val finalPlan = executedPlan.asInstanceOf[AdaptiveSparkPlanExec].executedPlan
       val lastStageTransformer = finalPlan.find(_.isInstanceOf[WholeStageTransformer])
       assert(lastStageTransformer.nonEmpty)
-      val planJson = lastStageTransformer.get.asInstanceOf[WholeStageTransformer].getPlanJson
+      val planJson = lastStageTransformer.get.asInstanceOf[WholeStageTransformer].substraitPlanJson
       assert(planJson.nonEmpty)
     }
+    spark.sparkContext.setLogLevel(logLevel)
   }
 
   test("generate example", GenerateExample) {
     import testImplicits._
     withSQLConf(
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1",
-      SQLConf.SHUFFLE_PARTITIONS.key -> "2"
+      SQLConf.SHUFFLE_PARTITIONS.key -> "2",
+      GlutenConfig.CACHE_WHOLE_STAGE_TRANSFORMER_CONTEXT.key -> "true"
     ) {
       val q4_lineitem = spark
         .sql(s"""
@@ -137,10 +144,11 @@ class NativeBenchmarkPlanGenerator extends WholeStageTransformerSuite {
       val lastStageTransformer = finalPlan.find(_.isInstanceOf[WholeStageTransformer])
       assert(lastStageTransformer.nonEmpty)
       val plan =
-        lastStageTransformer.get.asInstanceOf[WholeStageTransformer].getPlanJson.split('\n')
+        lastStageTransformer.get.asInstanceOf[WholeStageTransformer].substraitPlanJson.split('\n')
 
       val exampleJsonFile = Paths.get(generatedPlanDir, "example.json")
       Files.write(exampleJsonFile, plan.toList.asJava, StandardCharsets.UTF_8)
     }
+    spark.sparkContext.setLogLevel(logLevel)
   }
 }
